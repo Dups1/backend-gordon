@@ -1,0 +1,26 @@
+{
+  "name": "backend-gordon",
+  "version": "1.0.0",
+  "private": true,
+  "description": "API de transcripción de audio para Gordon usando Groq Whisper Large-v3.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "groq-sdk": "^1.4.0",
+    "helmet": "^8.3.0",
+    "multer": "^2.2.0"
+  },
+  "devDependencies": {
+    "supertest": "^7.2.2"
+  }
+}
