@@ -13,7 +13,7 @@ Comprueba que el servicio está activo.
 
 Recibe `multipart/form-data`:
 
-- `audio` (obligatorio): FLAC, M4A, MP3, MP4, MPEG, MPGA, OGG, WAV o WEBM,
+- `audio` (obligatorio): FLAC, M4A, MP3, MP4, MPEG, MPGA, OGG, OPUS, WAV o WEBM,
   con un máximo de 25 MB.
 - `language` (opcional): código ISO-639-1, por ejemplo `es` o `en`.
 - `prompt` (opcional): contexto que puede orientar la transcripción.
@@ -96,3 +96,11 @@ npm test
 
 Las pruebas usan un cliente Groq simulado: no consumen créditos ni necesitan una
 clave real.
+
+## Conversión de OPUS
+
+Los archivos `.opus` se convierten automáticamente a FLAC mono de 16 kHz antes
+de enviarse a Groq. El proyecto incluye un binario de FFmpeg específico para la
+plataforma mediante `ffmpeg-static`, por lo que Render lo instala junto con las
+dependencias de Node. Tanto el archivo original como el convertido se eliminan
+al terminar, incluso si Groq devuelve un error.

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { access, readFile } from 'node:fs/promises';
+import { access, copyFile, readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 import request from 'supertest';
@@ -98,4 +98,35 @@ test('elimina el archivo temporal aunque Groq responda con error', async () => {
 
   assert.equal(response.body.error.code, 'ERROR_GROQ');
   await assert.rejects(access(rutaTemporal));
+});
+
+test('convierte OPUS antes de enviarlo a Groq y limpia ambos archivos', async () => {
+  let rutaOriginal;
+  let rutaConvertida;
+  let rutaEnviadaAGroq;
+  const convertirOpus = async (ruta) => {
+    rutaOriginal = ruta;
+    rutaConvertida = `${ruta}.flac`;
+    await copyFile(ruta, rutaConvertida);
+    return rutaConvertida;
+  };
+  const groqClient = clienteGroqFalso(async (opciones) => {
+    rutaEnviadaAGroq = opciones.file.path;
+    opciones.file.destroy();
+    return { text: 'Audio OPUS transcrito.' };
+  });
+
+  const response = await request(createApp({ groqClient, convertirOpus }))
+    .post('/api/transcriptions')
+    .attach('audio', Buffer.from('opus simulado'), {
+      filename: 'nota-de-voz.opus',
+      contentType: 'audio/opus',
+    })
+    .expect(200);
+
+  assert.equal(rutaEnviadaAGroq, rutaConvertida);
+  assert.match(rutaEnviadaAGroq, /\.flac$/);
+  assert.equal(response.body.transcription, 'Audio OPUS transcrito.');
+  await assert.rejects(access(rutaOriginal));
+  await assert.rejects(access(rutaConvertida));
 });

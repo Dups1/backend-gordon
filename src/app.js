@@ -1,11 +1,13 @@
 import { randomUUID } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import { createReadStream, mkdirSync } from 'node:fs';
-import { unlink } from 'node:fs/promises';
+import { stat, unlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
 import cors from 'cors';
 import express from 'express';
+import ffmpegPath from 'ffmpeg-static';
 import Groq from 'groq-sdk';
 import helmet from 'helmet';
 import multer from 'multer';
@@ -21,6 +23,7 @@ const extensionesAdmitidas = new Set([
   '.mpeg',
   '.mpga',
   '.ogg',
+  '.opus',
   '.wav',
   '.webm',
 ]);
@@ -55,7 +58,7 @@ function validarTipoDeAudio(_request, archivo, callback) {
     callback(
       new ErrorHttp(
         415,
-        'Formato no admitido. Usa FLAC, M4A, MP3, MP4, MPEG, MPGA, OGG, WAV o WEBM.',
+        'Formato no admitido. Usa FLAC, M4A, MP3, MP4, MPEG, MPGA, OGG, OPUS, WAV o WEBM.',
         'FORMATO_NO_ADMITIDO',
       ),
     );
@@ -75,6 +78,118 @@ function crearSubida(maxAudioBytes) {
     },
     fileFilter: validarTipoDeAudio,
   });
+}
+
+export async function convertirOpusAFlac(
+  rutaEntrada,
+  {
+    binario = ffmpegPath,
+    maxAudioBytes = MAX_AUDIO_BYTES,
+    tiempoLimiteMs = 60000,
+  } = {},
+) {
+  if (!binario) {
+    throw new ErrorHttp(
+      503,
+      'El conversor de audio no está disponible.',
+      'FFMPEG_NO_DISPONIBLE',
+    );
+  }
+
+  const rutaSalida = path.join(
+    directorioTemporal,
+    `${randomUUID()}.flac`,
+  );
+  const argumentos = [
+    '-nostdin',
+    '-hide_banner',
+    '-loglevel',
+    'error',
+    '-y',
+    '-i',
+    rutaEntrada,
+    '-vn',
+    '-ac',
+    '1',
+    '-ar',
+    '16000',
+    '-c:a',
+    'flac',
+    '-compression_level',
+    '5',
+    '-fs',
+    String(maxAudioBytes),
+    rutaSalida,
+  ];
+
+  try {
+    await new Promise((resolve, reject) => {
+      const proceso = spawn(binario, argumentos, {
+        stdio: ['ignore', 'ignore', 'ignore'],
+      });
+      let excedioTiempo = false;
+      const temporizador = setTimeout(() => {
+        excedioTiempo = true;
+        proceso.kill('SIGKILL');
+      }, tiempoLimiteMs);
+
+      proceso.once('error', () => {
+        clearTimeout(temporizador);
+        reject(
+          new ErrorHttp(
+            503,
+            'No fue posible iniciar el conversor de audio.',
+            'FFMPEG_NO_DISPONIBLE',
+          ),
+        );
+      });
+      proceso.once('close', (codigo) => {
+        clearTimeout(temporizador);
+        if (excedioTiempo) {
+          reject(
+            new ErrorHttp(
+              504,
+              'La conversión del audio tardó demasiado.',
+              'CONVERSION_AGOTADA',
+            ),
+          );
+          return;
+        }
+        if (codigo !== 0) {
+          reject(
+            new ErrorHttp(
+              422,
+              'El archivo OPUS no contiene audio válido.',
+              'OPUS_INVALIDO',
+            ),
+          );
+          return;
+        }
+        resolve();
+      });
+    });
+
+    const informacion = await stat(rutaSalida);
+    if (informacion.size === 0) {
+      throw new ErrorHttp(
+        422,
+        'La conversión no produjo audio.',
+        'OPUS_INVALIDO',
+      );
+    }
+    if (informacion.size >= maxAudioBytes) {
+      throw new ErrorHttp(
+        413,
+        'El audio convertido supera el límite de 25 MB.',
+        'ARCHIVO_CONVERTIDO_DEMASIADO_GRANDE',
+      );
+    }
+
+    return rutaSalida;
+  } catch (error) {
+    await unlink(rutaSalida).catch(() => {});
+    throw error;
+  }
 }
 
 function crearConfiguracionCors(origenesConfigurados) {
@@ -160,6 +275,7 @@ export function createApp({
   groqClient,
   corsOrigin = process.env.CORS_ORIGIN ?? '*',
   maxAudioBytes = MAX_AUDIO_BYTES,
+  convertirOpus = convertirOpusAFlac,
 } = {}) {
   const app = express();
   const subirAudio = crearSubida(maxAudioBytes);
@@ -191,12 +307,21 @@ export function createApp({
         return;
       }
 
+      let rutaConvertida;
       try {
         const language = validarIdioma(request.body.language);
         const prompt = textoOpcional(request.body.prompt);
         const cliente = obtenerClienteGroq(groqClient);
+        const esOpus =
+          path.extname(request.file.originalname).toLowerCase() === '.opus';
+        if (esOpus) {
+          rutaConvertida = await convertirOpus(request.file.path, {
+            maxAudioBytes,
+          });
+        }
+        const rutaParaTranscribir = rutaConvertida ?? request.file.path;
         const opciones = {
-          file: createReadStream(request.file.path),
+          file: createReadStream(rutaParaTranscribir),
           model: GROQ_MODEL,
           response_format: 'json',
           temperature: 0,
@@ -225,6 +350,9 @@ export function createApp({
         next(error);
       } finally {
         await unlink(request.file.path).catch(() => {});
+        if (rutaConvertida) {
+          await unlink(rutaConvertida).catch(() => {});
+        }
       }
     },
   );
