@@ -161,8 +161,10 @@ test('envía el audio a Groq y devuelve la transcripción', async () => {
 
 test('detecta errores gramaticales con evidencia literal y descarta inventados', async () => {
   let opcionesGramatica;
+  let opcionesWhisper;
   const groqClient = clienteGroqFalso(
     async (opciones) => {
+      opcionesWhisper = opciones;
       opciones.file.destroy();
       return {
         text: 'She go to school every day.',
@@ -218,6 +220,7 @@ test('detecta errores gramaticales con evidencia literal y descarta inventados',
   const response = await request(createApp({ groqClient }))
     .post('/api/transcriptions')
     .field('language', 'en')
+    .field('evaluationPrompt', 'Evalúa concordancia para nivel A2.')
     .attach('audio', Buffer.from('audio simulado'), {
       filename: 'gramatica.wav',
       contentType: 'audio/wav',
@@ -229,10 +232,28 @@ test('detecta errores gramaticales con evidencia literal y descarta inventados',
     opcionesGramatica.response_format.json_schema.strict,
     true,
   );
+  assert.match(
+    opcionesGramatica.messages[1].content,
+    /<instruccion_docente>\nEvalúa concordancia para nivel A2\.\n<\/instruccion_docente>/,
+  );
+  assert.equal(opcionesWhisper.prompt, undefined);
   assert.equal(response.body.grammar.score, 72);
   assert.equal(response.body.grammar.errors.length, 1);
   assert.equal(response.body.grammar.errors[0].original, 'She go');
   assert.equal(response.body.grammarError, null);
+});
+
+test('rechaza instrucciones de evaluación mayores a 1000 caracteres', async () => {
+  const response = await request(createApp())
+    .post('/api/transcriptions')
+    .field('evaluationPrompt', 'a'.repeat(1001))
+    .attach('audio', Buffer.from('audio simulado'), {
+      filename: 'evaluacion.wav',
+      contentType: 'audio/wav',
+    })
+    .expect(400);
+
+  assert.equal(response.body.error.code, 'INSTRUCCION_DEMASIADO_LARGA');
 });
 
 test('anota pausas y alargamientos sin alterar el texto limpio de Whisper', () => {

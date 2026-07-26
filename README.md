@@ -17,6 +17,8 @@ Recibe `multipart/form-data`:
   con un máximo de 25 MB.
 - `language` (opcional): código ISO-639-1, por ejemplo `es` o `en`.
 - `prompt` (opcional): contexto que puede orientar la transcripción.
+- `evaluationPrompt` (opcional, máximo 1000 caracteres): instrucción del
+  docente que orienta la evaluación lingüística. No se envía a Whisper.
 
 Si `language` se omite, Groq detecta el idioma del audio. El backend conserva
 esa transcripción y asigna a Azure el locale correspondiente; por ejemplo,
@@ -28,7 +30,7 @@ Ejemplo:
 curl -X POST http://localhost:3000/api/transcriptions \
   -F "audio=@/ruta/grabacion.webm" \
   -F "language=es" \
-  -F "prompt=Evaluación oral académica"
+  -F "evaluationPrompt=Evalúa el uso del pasado para un alumno de nivel A2"
 ```
 
 Respuesta:
@@ -108,12 +110,15 @@ entregó. La transcripción limpia se mantiene en `transcription`; la evidencia
 temporal queda separada en `speechEvidence`. La confianza de reconocimiento no
 es una calificación de pronunciación.
 
-La transcripción limpia también se envía a `openai/gpt-oss-20b` mediante Groq
-para detectar errores gramaticales. La respuesta usa un esquema JSON estricto y
-cada error debe citar literalmente un fragmento de la transcripción; el backend
-descarta observaciones cuyo fragmento no exista. No se penalizan pausas,
-pronunciación, puntuación ni estilo. Con menos de tres palabras léxicas, la
-muestra se marca como insuficiente y no recibe puntuación gramatical.
+La transcripción limpia y `evaluationPrompt` también se envían a
+`openai/gpt-oss-20b` mediante Groq para detectar errores gramaticales conforme
+al criterio del docente. La instrucción queda delimitada como contexto no
+confiable: no puede cambiar el formato de salida ni solicitar que se alteren
+otras dimensiones. La respuesta usa un esquema JSON estricto y cada error debe
+citar literalmente un fragmento de la transcripción; el backend descarta
+observaciones cuyo fragmento no exista. No se penalizan pausas, pronunciación,
+puntuación ni estilo. Con menos de tres palabras léxicas, la muestra se marca
+como insuficiente y no recibe puntuación gramatical.
 
 Si Azure Speech está configurado, el backend convierte otra copia temporal a
 WAV PCM16 mono de 16 kHz y solicita Pronunciation Assessment. La transcripción
