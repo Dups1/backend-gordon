@@ -2,6 +2,7 @@
   "promptVersion": "gordon-evidence-v1",
   "files": {
     "securityEnvelope": "security-envelope.txt",
+    "instructionImprover": "instruction-improver.txt",
     "rubricCompiler": "rubric-compiler.txt",
     "evidenceExtractor": "evidence-extractor.txt",
     "analyticJudge": "analytic-judge.txt",

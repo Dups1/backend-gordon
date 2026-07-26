@@ -394,6 +394,54 @@ test('expone el flujo v2 síncrono con confirmación previa y audio real', async
   assert.equal(assessment.body.consentStorage.stored, false);
 });
 
+test('mejora una consigna sin ocultar ni reemplazar el texto original', async () => {
+  let specRecibida;
+  const app = createApp({
+    groqClient: {},
+    mejorarConsigna: async ({ spec }) => {
+      specRecibida = spec;
+      return {
+        originalInstruction: spec.instruction,
+        improvedInstruction:
+          'Narra una experiencia pasada y explica qué podías hacer antes y qué eres capaz de hacer ahora.',
+        detectedAudience: 'evaluator',
+        summary: 'La instrucción se convirtió en una tarea para el estudiante.',
+        preservedRequirements: [
+          'Usar pasado simple',
+          'Usar can, could y be able to',
+        ],
+        warnings: [],
+        generatedBy: {
+          provider: 'groq',
+          model: 'test-model',
+        },
+      };
+    },
+  });
+
+  const response = await request(app)
+    .post('/api/v2/instructions/improve')
+    .send({
+      mode: 'spontaneous',
+      targetLocale: 'en-US',
+      cefr: 'B1',
+      instruction:
+        'Fíjate que use pasado simple, can, could y be able to.',
+      communicativePurpose:
+        'Narrar una experiencia o una secuencia de hechos',
+    })
+    .expect(200);
+
+  assert.equal(specRecibida.mode, 'spontaneous');
+  assert.equal(
+    response.body.originalInstruction,
+    'Fíjate que use pasado simple, can, could y be able to.',
+  );
+  assert.match(response.body.improvedInstruction, /Narra una experiencia/);
+  assert.equal(response.body.generatedBy.reviewRequired, true);
+  assert.match(response.body.generatedBy.promptHash, /^[a-f0-9]{64}$/);
+});
+
 test('el endpoint v2 nunca evalúa sin bytes de audio', async () => {
   await request(createApp())
     .post('/api/v2/assessments')

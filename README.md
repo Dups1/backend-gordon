@@ -15,6 +15,20 @@ dominio del nivel objetivo seleccionado por el docente.
 
 ## API v2
 
+### Mejorar una consigna
+
+```http
+POST /api/v2/instructions/improve
+Content-Type: application/json
+```
+
+Recibe la misma especificación básica de la rúbrica: `mode`,
+`targetLocale`, `cefr`, `instruction`, `communicativePurpose` y, en lectura,
+`referenceText`. GPT-OSS devuelve `originalInstruction` e
+`improvedInstruction` por separado. La mejora conserva los requisitos
+explícitos y nunca se activa sin que el docente pueda revisar, editar o volver
+al texto original.
+
 ### Crear y confirmar una rúbrica
 
 ```http

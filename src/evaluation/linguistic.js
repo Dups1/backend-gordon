@@ -166,6 +166,36 @@ const rubricDraftSchema = {
   ],
 };
 
+const instructionImprovementSchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    improvedInstruction: { type: 'string' },
+    detectedAudience: {
+      type: 'string',
+      enum: ['student', 'evaluator', 'mixed', 'unclear'],
+    },
+    summary: { type: 'string' },
+    preservedRequirements: {
+      type: 'array',
+      maxItems: 16,
+      items: { type: 'string' },
+    },
+    warnings: {
+      type: 'array',
+      maxItems: 8,
+      items: { type: 'string' },
+    },
+  },
+  required: [
+    'improvedInstruction',
+    'detectedAudience',
+    'summary',
+    'preservedRequirements',
+    'warnings',
+  ],
+};
+
 function parseStructured(response, name) {
   const content = response?.choices?.[0]?.message?.content;
   if (typeof content !== 'string' || !content.trim()) {
@@ -310,6 +340,68 @@ export async function enhanceRubricDraftWithAI({
           .filter(Boolean)
           .slice(0, 8)
       : [],
+    generatedBy: {
+      provider: 'groq',
+      model,
+      promptVersion: PROMPT_VERSION,
+    },
+  };
+}
+
+export async function improveStudentInstructionWithAI({
+  client,
+  model,
+  spec,
+}) {
+  const suggestion = await callStructured({
+    client,
+    model,
+    schema: instructionImprovementSchema,
+    schemaName: 'gordon_instruction_improvement',
+    maxTokens: 1000,
+    system: INTERNAL_PROMPTS.instructionImprover,
+    payload: { spec },
+  });
+  const improvedInstruction =
+    typeof suggestion.improvedInstruction === 'string'
+      ? suggestion.improvedInstruction.trim()
+      : '';
+  if (!improvedInstruction || improvedInstruction.length > 2000) {
+    throw new EvaluationError(
+      502,
+      'El modelo no devolvió una consigna mejorada válida.',
+      'INVALID_IMPROVED_INSTRUCTION',
+    );
+  }
+  const cleanList = (value, maxItems, maxLength) =>
+    Array.isArray(value)
+      ? value
+          .filter((item) => typeof item === 'string')
+          .map((item) => item.trim().slice(0, maxLength))
+          .filter(Boolean)
+          .slice(0, maxItems)
+      : [];
+  return {
+    originalInstruction: spec.instruction,
+    improvedInstruction,
+    detectedAudience: [
+      'student',
+      'evaluator',
+      'mixed',
+      'unclear',
+    ].includes(suggestion.detectedAudience)
+      ? suggestion.detectedAudience
+      : 'unclear',
+    summary:
+      typeof suggestion.summary === 'string'
+        ? suggestion.summary.trim().slice(0, 500)
+        : '',
+    preservedRequirements: cleanList(
+      suggestion.preservedRequirements,
+      16,
+      160,
+    ),
+    warnings: cleanList(suggestion.warnings, 8, 500),
     generatedBy: {
       provider: 'groq',
       model,

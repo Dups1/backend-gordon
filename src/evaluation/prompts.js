@@ -52,6 +52,7 @@ function prompt(role) {
 
 export const INTERNAL_PROMPTS = Object.freeze({
   securityEnvelope: prompt('securityEnvelope'),
+  instructionImprover: prompt('instructionImprover'),
   rubricCompiler: prompt('rubricCompiler'),
   evidenceExtractor: prompt('evidenceExtractor'),
   analyticJudge: prompt('analyticJudge'),

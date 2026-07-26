@@ -16,12 +16,16 @@ import {
   EvaluationError,
   createRubricDraft,
   confirmRubric,
+  normalizeEvaluationSpec,
   normalizeTokens,
   verifyRubricToken,
 } from './evaluation/domain.js';
 import { prepareAudio } from './evaluation/audio.js';
 import { runAssessment } from './evaluation/engine.js';
-import { enhanceRubricDraftWithAI } from './evaluation/linguistic.js';
+import {
+  enhanceRubricDraftWithAI,
+  improveStudentInstructionWithAI,
+} from './evaluation/linguistic.js';
 import { createPilotStorage } from './evaluation/storage.js';
 import { circuitSnapshot } from './evaluation/resilience.js';
 import {
@@ -1550,6 +1554,7 @@ export function createApp({
   prepararAudio = prepareAudio,
   ejecutarEvaluacion = runAssessment,
   compilarRubrica = enhanceRubricDraftWithAI,
+  mejorarConsigna = improveStudentInstructionWithAI,
   almacenamientoPiloto = createPilotStorage(),
   rubricSigningSecret,
   maxConcurrentAssessments = Number.parseInt(
@@ -1648,6 +1653,29 @@ export function createApp({
   });
 
   app.use('/api/v2', limitadorV2);
+
+  app.post('/api/v2/instructions/improve', async (request, response, next) => {
+    try {
+      const spec = normalizeEvaluationSpec(request.body);
+      const improvement = await mejorarConsigna({
+        client: obtenerClienteGroq(groqClient),
+        model: GROQ_GRAMMAR_MODEL,
+        spec,
+      });
+      response.json({
+        schemaVersion: '2.0.0',
+        ...improvement,
+        generatedBy: {
+          ...improvement.generatedBy,
+          promptVersion: PROMPT_MANIFEST_VERSION,
+          promptHash: PROMPT_MANIFEST_HASH,
+          reviewRequired: true,
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
 
   app.post('/api/v2/rubrics/draft', async (request, response, next) => {
     try {
