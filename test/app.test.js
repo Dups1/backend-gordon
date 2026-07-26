@@ -115,6 +115,8 @@ test('envía el audio a Groq y devuelve la transcripción', async () => {
         noSpeechProb: 0.04,
       },
     ],
+    pronunciation: null,
+    pronunciationError: null,
   });
   await assert.rejects(access(rutaTemporal));
 });
@@ -168,4 +170,149 @@ test('convierte OPUS antes de enviarlo a Groq y limpia ambos archivos', async ()
   assert.equal(response.body.transcription, 'Audio OPUS transcrito.');
   await assert.rejects(access(rutaOriginal));
   await assert.rejects(access(rutaConvertida));
+});
+
+test('rota a la clave secundaria de Azure ante un error de autenticación', async () => {
+  let rutaWav;
+  const clavesRecibidas = [];
+  const convertirAzure = async (ruta) => {
+    rutaWav = `${ruta}.wav`;
+    await copyFile(ruta, rutaWav);
+    return rutaWav;
+  };
+  const groqClient = clienteGroqFalso(async (opciones) => {
+    opciones.file.destroy();
+    return {
+      text: 'Good morning.',
+      language: 'English',
+      duration: 2,
+      words: [
+        { word: 'Good', start: 0, end: 0.5 },
+        { word: 'morning.', start: 0.5, end: 1.2 },
+      ],
+      segments: [],
+    };
+  });
+  const azureFetch = async (_url, opciones) => {
+    clavesRecibidas.push(opciones.headers['Ocp-Apim-Subscription-Key']);
+    if (clavesRecibidas.length === 1) {
+      return new Response('{}', { status: 401 });
+    }
+    return Response.json({
+      RecognitionStatus: 'Success',
+      NBest: [
+        {
+          PronScore: 88.4,
+          AccuracyScore: 86.2,
+          FluencyScore: 80.5,
+          CompletenessScore: 100,
+          ProsodyScore: 79.1,
+          Words: [
+            {
+              Word: 'morning',
+              AccuracyScore: 72.3,
+              ErrorType: 'Mispronunciation',
+              Phonemes: [
+                { Phoneme: 'ɔː', AccuracyScore: 61.2 },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+  };
+
+  const response = await request(
+    createApp({
+      groqClient,
+      convertirAzure,
+      azureFetch,
+      azureConfig: {
+        clavePrimaria: 'clave-primaria-prueba',
+        claveSecundaria: 'clave-secundaria-prueba',
+        region: 'southcentralus',
+        endpoint:
+          'https://gordon-speech-pronunciation.cognitiveservices.azure.com/',
+      },
+    }),
+  )
+    .post('/api/transcriptions')
+    .field('language', 'en')
+    .attach('audio', Buffer.from('audio simulado'), {
+      filename: 'grabacion.wav',
+      contentType: 'audio/wav',
+    })
+    .expect(200);
+
+  assert.deepEqual(clavesRecibidas, [
+    'clave-primaria-prueba',
+    'clave-secundaria-prueba',
+  ]);
+  assert.deepEqual(response.body.pronunciation, {
+    provider: 'azure-speech',
+    pronunciationScore: 88.4,
+    accuracyScore: 86.2,
+    fluencyScore: 80.5,
+    completenessScore: 100,
+    prosodyScore: 79.1,
+    words: [
+      {
+        word: 'morning',
+        accuracyScore: 72.3,
+        errorType: 'Mispronunciation',
+        phonemes: [{ phoneme: 'ɔː', accuracyScore: 61.2 }],
+      },
+    ],
+  });
+  assert.equal(response.body.pronunciationError, null);
+  assert.doesNotMatch(
+    JSON.stringify(response.body),
+    /clave-(primaria|secundaria)-prueba/,
+  );
+  await assert.rejects(access(rutaWav));
+});
+
+test('no rota claves de Azure ante errores ajenos a autenticación', async () => {
+  let llamadasAzure = 0;
+  const convertirAzure = async (ruta) => {
+    const rutaWav = `${ruta}.wav`;
+    await copyFile(ruta, rutaWav);
+    return rutaWav;
+  };
+  const groqClient = clienteGroqFalso(async (opciones) => {
+    opciones.file.destroy();
+    return {
+      text: 'Good morning.',
+      duration: 2,
+      words: [],
+      segments: [],
+    };
+  });
+
+  const response = await request(
+    createApp({
+      groqClient,
+      convertirAzure,
+      azureFetch: async () => {
+        llamadasAzure++;
+        return new Response('{}', { status: 500 });
+      },
+      azureConfig: {
+        clavePrimaria: 'primaria',
+        claveSecundaria: 'secundaria',
+        region: 'southcentralus',
+      },
+    }),
+  )
+    .post('/api/transcriptions')
+    .field('language', 'en')
+    .attach('audio', Buffer.from('audio simulado'), {
+      filename: 'grabacion.wav',
+      contentType: 'audio/wav',
+    })
+    .expect(200);
+
+  assert.equal(llamadasAzure, 1);
+  assert.equal(response.body.pronunciation, null);
+  assert.equal(response.body.pronunciationError.code, 'ERROR_AZURE');
 });

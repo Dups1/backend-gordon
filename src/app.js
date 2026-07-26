@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { createReadStream, mkdirSync } from 'node:fs';
-import { stat, unlink } from 'node:fs/promises';
+import { readFile, stat, unlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -14,6 +14,7 @@ import multer from 'multer';
 
 export const GROQ_MODEL = 'whisper-large-v3';
 export const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
+export const MAX_AZURE_PRONUNCIATION_SECONDS = 30;
 
 const extensionesAdmitidas = new Set([
   '.flac',
@@ -192,6 +193,112 @@ export async function convertirOpusAFlac(
   }
 }
 
+export async function convertirAudioAWav(
+  rutaEntrada,
+  {
+    binario = ffmpegPath,
+    maxAudioBytes = MAX_AUDIO_BYTES,
+    tiempoLimiteMs = 60000,
+  } = {},
+) {
+  if (!binario) {
+    throw new ErrorHttp(
+      503,
+      'El conversor de audio no está disponible.',
+      'FFMPEG_NO_DISPONIBLE',
+    );
+  }
+
+  const rutaSalida = path.join(directorioTemporal, `${randomUUID()}.wav`);
+  const argumentos = [
+    '-nostdin',
+    '-hide_banner',
+    '-loglevel',
+    'error',
+    '-y',
+    '-i',
+    rutaEntrada,
+    '-vn',
+    '-ac',
+    '1',
+    '-ar',
+    '16000',
+    '-c:a',
+    'pcm_s16le',
+    '-fs',
+    String(maxAudioBytes),
+    rutaSalida,
+  ];
+
+  try {
+    await new Promise((resolve, reject) => {
+      const proceso = spawn(binario, argumentos, {
+        stdio: ['ignore', 'ignore', 'ignore'],
+      });
+      let excedioTiempo = false;
+      const temporizador = setTimeout(() => {
+        excedioTiempo = true;
+        proceso.kill('SIGKILL');
+      }, tiempoLimiteMs);
+
+      proceso.once('error', () => {
+        clearTimeout(temporizador);
+        reject(
+          new ErrorHttp(
+            503,
+            'No fue posible iniciar el conversor de audio.',
+            'FFMPEG_NO_DISPONIBLE',
+          ),
+        );
+      });
+      proceso.once('close', (codigo) => {
+        clearTimeout(temporizador);
+        if (excedioTiempo) {
+          reject(
+            new ErrorHttp(
+              504,
+              'La conversión del audio tardó demasiado.',
+              'CONVERSION_AGOTADA',
+            ),
+          );
+          return;
+        }
+        if (codigo !== 0) {
+          reject(
+            new ErrorHttp(
+              422,
+              'El archivo no contiene audio válido para evaluar.',
+              'AUDIO_INVALIDO',
+            ),
+          );
+          return;
+        }
+        resolve();
+      });
+    });
+
+    const informacion = await stat(rutaSalida);
+    if (informacion.size === 0) {
+      throw new ErrorHttp(
+        422,
+        'La conversión no produjo audio.',
+        'AUDIO_INVALIDO',
+      );
+    }
+    if (informacion.size >= maxAudioBytes) {
+      throw new ErrorHttp(
+        413,
+        'El audio convertido supera el límite de 25 MB.',
+        'ARCHIVO_CONVERTIDO_DEMASIADO_GRANDE',
+      );
+    }
+    return rutaSalida;
+  } catch (error) {
+    await unlink(rutaSalida).catch(() => {});
+    throw error;
+  }
+}
+
 function crearConfiguracionCors(origenesConfigurados) {
   if (!origenesConfigurados || origenesConfigurados.trim() === '*') {
     return { origin: '*' };
@@ -239,6 +346,155 @@ function obtenerClienteGroq(clienteInyectado) {
   return new Groq({ apiKey });
 }
 
+function obtenerConfiguracionAzure(configuracionInyectada) {
+  if (configuracionInyectada !== undefined) {
+    return configuracionInyectada;
+  }
+
+  const clavePrimaria =
+    process.env.AZURE_SPEECH_KEY_PRIMARY?.trim() ||
+    process.env.AZURE_SPEECH_KEY?.trim();
+  const claveSecundaria = process.env.AZURE_SPEECH_KEY_SECONDARY?.trim();
+  const region = process.env.AZURE_SPEECH_REGION?.trim().toLowerCase();
+  const endpoint = process.env.AZURE_SPEECH_ENDPOINT?.trim();
+  if (!clavePrimaria || !region) {
+    return null;
+  }
+  return {
+    clavePrimaria,
+    claveSecundaria,
+    region,
+    endpoint,
+  };
+}
+
+function endpointPronunciacionAzure(configuracion, idioma) {
+  let endpoint;
+  if (configuracion.endpoint) {
+    endpoint = new URL(configuracion.endpoint);
+    if (endpoint.protocol !== 'https:') {
+      throw new ErrorHttp(
+        503,
+        'El endpoint de Azure Speech debe utilizar HTTPS.',
+        'AZURE_ENDPOINT_INVALIDO',
+      );
+    }
+    endpoint.pathname =
+      '/stt/speech/recognition/conversation/cognitiveservices/v1';
+  } else {
+    endpoint = new URL(
+      `https://${configuracion.region}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1`,
+    );
+  }
+  endpoint.searchParams.set('language', idioma);
+  endpoint.searchParams.set('format', 'detailed');
+  return endpoint;
+}
+
+function numeroAzure(valor) {
+  return typeof valor === 'number' && Number.isFinite(valor) ? valor : null;
+}
+
+function normalizarResultadoPronunciacion(resultado) {
+  const mejor = Array.isArray(resultado?.NBest) ? resultado.NBest[0] : null;
+  if (!mejor) {
+    throw new ErrorHttp(
+      502,
+      'Azure Speech no devolvió una evaluación de pronunciación.',
+      'AZURE_SIN_EVALUACION',
+    );
+  }
+
+  return {
+    provider: 'azure-speech',
+    pronunciationScore: numeroAzure(mejor.PronScore),
+    accuracyScore: numeroAzure(mejor.AccuracyScore),
+    fluencyScore: numeroAzure(mejor.FluencyScore),
+    completenessScore: numeroAzure(mejor.CompletenessScore),
+    prosodyScore: numeroAzure(mejor.ProsodyScore),
+    words: Array.isArray(mejor.Words)
+      ? mejor.Words.map((palabra) => ({
+          word: typeof palabra.Word === 'string' ? palabra.Word : '',
+          accuracyScore: numeroAzure(palabra.AccuracyScore),
+          errorType:
+            typeof palabra.ErrorType === 'string' ? palabra.ErrorType : null,
+          phonemes: Array.isArray(palabra.Phonemes)
+            ? palabra.Phonemes.map((fonema) => ({
+                phoneme:
+                  typeof fonema.Phoneme === 'string' ? fonema.Phoneme : '',
+                accuracyScore: numeroAzure(fonema.AccuracyScore),
+              }))
+            : [],
+        }))
+      : [],
+  };
+}
+
+export async function evaluarPronunciacionAzure({
+  rutaWav,
+  textoReferencia,
+  idioma = 'en-US',
+  configuracion,
+  fetchImpl = globalThis.fetch,
+}) {
+  const claves = [
+    configuracion.clavePrimaria,
+    configuracion.claveSecundaria,
+  ].filter((clave, indice, lista) => clave && lista.indexOf(clave) === indice);
+  const parametros = Buffer.from(
+    JSON.stringify({
+      ReferenceText: textoReferencia,
+      GradingSystem: 'HundredMark',
+      Granularity: 'Phoneme',
+      Dimension: 'Comprehensive',
+      EnableMiscue: 'True',
+      EnableProsodyAssessment: 'True',
+    }),
+    'utf8',
+  ).toString('base64');
+  const audio = await readFile(rutaWav);
+  const endpoint = endpointPronunciacionAzure(configuracion, idioma);
+
+  for (let indice = 0; indice < claves.length; indice++) {
+    const respuesta = await fetchImpl(endpoint, {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'audio/wav; codecs=audio/pcm; samplerate=16000',
+        'Ocp-Apim-Subscription-Key': claves[indice],
+        'Pronunciation-Assessment': parametros,
+      },
+      body: audio,
+    });
+
+    if ((respuesta.status === 401 || respuesta.status === 403) &&
+        indice < claves.length - 1) {
+      continue;
+    }
+    if (respuesta.status === 401 || respuesta.status === 403) {
+      throw new ErrorHttp(
+        502,
+        'Azure Speech rechazó las claves configuradas.',
+        'AZURE_AUTENTICACION',
+      );
+    }
+    if (!respuesta.ok) {
+      throw new ErrorHttp(
+        502,
+        'Azure Speech no pudo evaluar la pronunciación.',
+        'ERROR_AZURE',
+      );
+    }
+    return normalizarResultadoPronunciacion(await respuesta.json());
+  }
+
+  throw new ErrorHttp(
+    503,
+    'Azure Speech no tiene claves configuradas.',
+    'AZURE_NO_CONFIGURADO',
+  );
+}
+
 function textoOpcional(valor) {
   return typeof valor === 'string' ? valor.trim() : '';
 }
@@ -273,9 +529,12 @@ function errorDeGroq(error) {
 
 export function createApp({
   groqClient,
+  azureConfig,
+  azureFetch = globalThis.fetch,
   corsOrigin = process.env.CORS_ORIGIN ?? '*',
   maxAudioBytes = MAX_AUDIO_BYTES,
   convertirOpus = convertirOpusAFlac,
+  convertirAzure = convertirAudioAWav,
 } = {}) {
   const app = express();
   const subirAudio = crearSubida(maxAudioBytes);
@@ -308,6 +567,7 @@ export function createApp({
       }
 
       let rutaConvertida;
+      let rutaAzure;
       try {
         const language = validarIdioma(request.body.language);
         const prompt = textoOpcional(request.body.prompt);
@@ -340,6 +600,45 @@ export function createApp({
           resultado = await cliente.audio.transcriptions.create(opciones);
         } catch (error) {
           throw errorDeGroq(error);
+        }
+
+        const configuracionAzure = obtenerConfiguracionAzure(azureConfig);
+        let pronunciacion = null;
+        let errorPronunciacion = null;
+        if (
+          configuracionAzure &&
+          resultado.text?.trim() &&
+          (!resultado.duration ||
+            resultado.duration <= MAX_AZURE_PRONUNCIATION_SECONDS)
+        ) {
+          try {
+            rutaAzure = await convertirAzure(request.file.path, {
+              maxAudioBytes,
+            });
+            pronunciacion = await evaluarPronunciacionAzure({
+              rutaWav: rutaAzure,
+              textoReferencia: resultado.text.trim(),
+              idioma: language === 'en' || !language ? 'en-US' : language,
+              configuracion: configuracionAzure,
+              fetchImpl: azureFetch,
+            });
+          } catch (error) {
+            errorPronunciacion = {
+              code: error?.code ?? 'ERROR_AZURE',
+              message:
+                error?.message ??
+                'No fue posible evaluar la pronunciación con Azure Speech.',
+            };
+          }
+        } else if (
+          configuracionAzure &&
+          resultado.duration > MAX_AZURE_PRONUNCIATION_SECONDS
+        ) {
+          errorPronunciacion = {
+            code: 'AUDIO_AZURE_DEMASIADO_LARGO',
+            message:
+              'La evaluación de pronunciación admite audios de hasta 30 segundos.',
+          };
         }
 
         const numeroFinito = (valor) =>
@@ -393,6 +692,8 @@ export function createApp({
           duration: numeroFinito(resultado.duration) ?? ultimaMarca,
           words: palabras,
           segments: segmentos,
+          pronunciation: pronunciacion,
+          pronunciationError: errorPronunciacion,
         });
       } catch (error) {
         next(error);
@@ -400,6 +701,9 @@ export function createApp({
         await unlink(request.file.path).catch(() => {});
         if (rutaConvertida) {
           await unlink(rutaConvertida).catch(() => {});
+        }
+        if (rutaAzure) {
+          await unlink(rutaAzure).catch(() => {});
         }
       }
     },

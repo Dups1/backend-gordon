@@ -48,7 +48,17 @@ Respuesta:
       "compressionRatio": 1.18,
       "noSpeechProb": 0.04
     }
-  ]
+  ],
+  "pronunciation": {
+    "provider": "azure-speech",
+    "pronunciationScore": 88.4,
+    "accuracyScore": 86.2,
+    "fluencyScore": 80.5,
+    "completenessScore": 100,
+    "prosodyScore": 79.1,
+    "words": []
+  },
+  "pronunciationError": null
 }
 ```
 
@@ -56,6 +66,12 @@ El backend solicita `verbose_json` y marcas por palabra y segmento. Estas
 marcas permiten observar pausas, duración y ritmo aunque Whisper normalice la
 frase al escribirla. La confianza de reconocimiento no es una calificación de
 pronunciación.
+
+Si Azure Speech está configurado, el backend convierte otra copia temporal a
+WAV PCM16 mono de 16 kHz y solicita Pronunciation Assessment. La transcripción
+de Groq se utiliza como texto de referencia para obtener puntuaciones por
+audio, palabra y fonema. La API REST de pronunciación admite audios de hasta 30
+segundos.
 
 ## Desarrollo local
 
@@ -70,6 +86,10 @@ Edita `.env` y coloca tu clave:
 
 ```dotenv
 GROQ_API_KEY=gsk_tu_clave_real
+AZURE_SPEECH_KEY_PRIMARY=key_1
+AZURE_SPEECH_KEY_SECONDARY=key_2
+AZURE_SPEECH_REGION=southcentralus
+AZURE_SPEECH_ENDPOINT=https://tu-recurso.cognitiveservices.azure.com/
 PORT=3000
 CORS_ORIGIN=http://localhost:8080
 ```
@@ -97,6 +117,16 @@ Agrega esta variable obligatoria en **Environment**:
 
 - `GROQ_API_KEY`: tu clave privada de Groq.
 
+Para obtener pronunciación y rotación automática agrega:
+
+- `AZURE_SPEECH_KEY_PRIMARY`: `KEY 1` del recurso.
+- `AZURE_SPEECH_KEY_SECONDARY`: `KEY 2` del recurso.
+- `AZURE_SPEECH_REGION`: identificador como `southcentralus`.
+- `AZURE_SPEECH_ENDPOINT`: extremo mostrado por Azure.
+
+Por compatibilidad, `AZURE_SPEECH_KEY` funciona como clave primaria cuando
+`AZURE_SPEECH_KEY_PRIMARY` no existe.
+
 Las siguientes variables son opcionales:
 
 - `CORS_ORIGIN`: limita qué frontend puede llamar al backend desde un navegador.
@@ -107,6 +137,22 @@ Las siguientes variables son opcionales:
 
 Render proporciona `PORT` automáticamente; el servidor ya escucha esa variable
 en `0.0.0.0`.
+
+### Rotación de claves
+
+El backend llama primero con la clave primaria. Solamente si Azure responde
+`401` o `403`, repite una vez con la secundaria. Las claves nunca se incluyen
+en respuestas ni registros.
+
+Para rotarlas sin interrupción:
+
+1. Mantén ambas variables configuradas en Render.
+2. Regenera `KEY 1` en Azure.
+3. Actualiza `AZURE_SPEECH_KEY_PRIMARY` en Render.
+4. Comprueba una evaluación.
+5. Regenera `KEY 2` y actualiza `AZURE_SPEECH_KEY_SECONDARY`.
+
+No regeneres las dos claves al mismo tiempo.
 
 ## Pruebas
 
