@@ -2,23 +2,26 @@
   "name": "backend-gordon",
   "version": "1.0.0",
   "private": true,
-  "description": "API de transcripción de audio para Gordon usando Groq Whisper Large-v3.",
+  "description": "Motor de evaluación oral de Gordon con Whisper, Azure Speech y scoring basado en evidencia.",
   "type": "module",
   "engines": {
     "node": ">=20"
   },
   "scripts": {
+    "calibration:analyze": "node calibration/analyze-jsonl.js",
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
     "test": "node --test"
   },
   "dependencies": {
+    "@azure/storage-blob": "^12.28.0",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "ffmpeg-static": "5.3.0",
     "groq-sdk": "^1.4.0",
     "helmet": "^8.3.0",
+    "microsoft-cognitiveservices-speech-sdk": "^1.45.0",
     "multer": "^2.2.0"
   },
   "devDependencies": {

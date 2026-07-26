@@ -1,229 +1,218 @@
 # backend-gordon
 
-Servicio Node.js para recibir un archivo de audio y transcribirlo con
-`whisper-large-v3` mediante Groq.
+Motor Node.js de evaluación oral para Gordon. La API separa:
 
-## API
+- Whisper Large-v3: transcripción y timestamps.
+- Azure Pronunciation Assessment: evidencia acústica y fonética.
+- GPT-OSS: extracción lingüística, dos jueces independientes, adjudicación y
+  recomendación.
+- Gordon: calidad del audio, estados de abstención, perfil de pesos, intervalos
+  provisionales, procedencia y consentimiento.
 
-### `GET /health`
+Los scores actuales son **provisionales** hasta completar la calibración con
+evaluadores humanos. No representan una clasificación CEFR global: miden el
+dominio del nivel objetivo seleccionado por el docente.
 
-Comprueba que el servicio está activo.
+## API v2
 
-### `POST /api/transcriptions`
+### Crear y confirmar una rúbrica
 
-Recibe `multipart/form-data`:
+```http
+POST /api/v2/rubrics/draft
+Content-Type: application/json
+```
 
-- `audio` (obligatorio): FLAC, M4A, MP3, MP4, MPEG, MPGA, OGG, OPUS, WAV o WEBM,
-  con un máximo de 25 MB.
-- `language` (opcional): código ISO-639-1, por ejemplo `es` o `en`.
-- `prompt` (opcional): contexto que puede orientar la transcripción.
-- `evaluationPrompt` (opcional, máximo 1000 caracteres): instrucción del
-  docente que orienta la evaluación lingüística. No se envía a Whisper.
+```json
+{
+  "mode": "spontaneous",
+  "targetLocale": "en-US",
+  "cefr": "B1",
+  "instruction": "Explain a learning experience and justify its importance.",
+  "communicativePurpose": "Explain and justify"
+}
+```
 
-Si `language` se omite, Groq detecta el idioma del audio. El backend conserva
-esa transcripción y asigna a Azure el locale correspondiente; por ejemplo,
-`Spanish` se evalúa como `es-MX` y `English` como `en-US`.
+Para lectura usa `"mode": "reading"` y agrega `referenceText`. GPT-OSS propone
+descriptores estructurados; si el proveedor está temporalmente fuera de
+servicio se devuelve una rúbrica CEFR conservadora con una advertencia. En
+ambos casos el docente debe revisarla.
+
+```http
+POST /api/v2/rubrics/confirm
+Content-Type: application/json
+```
+
+```json
+{ "draft": { "...": "borrador revisado por el docente" } }
+```
+
+La respuesta contiene `confirmedRubricToken`, firmado con HMAC. Cualquier
+alteración posterior invalida el token.
+
+### Evaluar audio
+
+```http
+POST /api/v2/assessments
+Content-Type: multipart/form-data
+Idempotency-Key: intento-123
+```
+
+Campos:
+
+- `audio`: obligatorio y con bytes reales.
+- `confirmedRubricToken`: obligatorio.
+- `consentToStore`: `true` o `false`.
+- `consentVersion`: obligatorio cuando se autoriza almacenar.
+- `participantPseudonym`: opcional.
 
 Ejemplo:
 
 ```bash
-curl -X POST http://localhost:3000/api/transcriptions \
-  -F "audio=@/ruta/grabacion.webm" \
-  -F "language=es" \
-  -F "evaluationPrompt=Evalúa el uso del pasado para un alumno de nivel A2"
+curl -X POST http://localhost:3000/api/v2/assessments \
+  -H "Idempotency-Key: intento-123" \
+  -F "audio=@/ruta/student.webm" \
+  -F "confirmedRubricToken=TOKEN_CONFIRMADO" \
+  -F "consentToStore=false"
 ```
 
-Respuesta:
+Todos los formatos admitidos —MP3, Opus, WebM, OGG, M4A, MP4, MPEG, FLAC y
+WAV— se validan por firma y se decodifican a WAV PCM16 mono a 16 kHz. El
+servidor mide duración, RMS, clipping, ruido, SNR estimado, proporción y
+duración de voz antes de consumir proveedores.
+
+En lectura Azure recibe el texto canónico confirmado, nunca la transcripción
+de Whisper. Las lecturas largas se dividen en bloques de hasta 25 segundos y
+se agregan por fonemas, palabras y duración elegible. Todas las respuestas
+espontáneas usan Azure Speech SDK continuo sin `ReferenceText`; REST queda
+reservado para lectura guiada.
+
+Whisper usa bloques de 28 segundos con dos segundos de solapamiento para audio
+largo. El backend corrige offsets y elimina duplicados del solapamiento. Solo
+se envían pistas breves de vocabulario confirmadas; nunca se usa la respuesta
+esperada completa como prompt del ASR.
+
+La respuesta v2 incluye:
+
+- calidad y hashes del audio;
+- transcripciones independiente de Whisper y Azure y su desacuerdo;
+- pausas y prolongaciones como eventos estructurados;
+- cinco dimensiones con `status`, `score`, `rawScore`, intervalo 90 %,
+  confiabilidad, método, versión, evidencia y limitaciones;
+- score global únicamente cuando las cinco dimensiones fueron puntuadas;
+- recomendación que no puede alterar puntuaciones;
+- versiones de proveedores, prompts, perfil y calibración.
+
+Si Azure falla, Pronunciation y Fluency quedan `unavailable`: no existe un
+fallback heurístico. Si falta cualquier dimensión no se redistribuyen pesos y
+el score global queda `null`.
+
+### Revisión humana
+
+```http
+POST /api/v2/human-ratings
+Authorization: Bearer TEACHER_REVIEW_TOKEN
+Content-Type: application/json
+```
 
 ```json
 {
-  "transcription": "Texto reconocido en el audio.",
-  "model": "whisper-large-v3",
-  "language": "es",
-  "duration": 3.4,
-  "words": [
-    { "word": "Texto", "start": 0.2, "end": 0.7 }
-  ],
-  "segments": [
-    {
-      "id": 0,
-      "text": "Texto reconocido en el audio.",
-      "start": 0.2,
-      "end": 3.1,
-      "avgLogprob": -0.24,
-      "compressionRatio": 1.18,
-      "noSpeechProb": 0.04
-    }
-  ],
-  "speechEvidence": {
-    "annotatedTranscript": "Hello, my name is [alargamiento 1.3 s] [pausa 0.7 s] David.",
-    "pauses": [
-      { "start": 2.55, "end": 3.25, "duration": 0.7 }
-    ],
-    "elongations": [
-      {
-        "word": "is",
-        "start": 1.2,
-        "end": 2.5,
-        "duration": 1.3
-      }
-    ],
-    "method": "ffmpeg-silencedetect+whisper-word-timestamps"
+  "assessmentId": "uuid",
+  "ratings": {
+    "communication": { "band": 3, "rationale": "Evidencia docente" },
+    "pronunciation": { "band": 2, "rationale": "Evidencia docente" }
   },
-  "grammar": {
-    "provider": "groq",
-    "model": "openai/gpt-oss-20b",
-    "sufficientEvidence": true,
-    "score": 72,
-    "summary": "Hay un error de concordancia.",
-    "correctedText": "She goes to school every day.",
-    "errors": [
-      {
-        "original": "She go",
-        "correction": "She goes",
-        "category": "Subject-verb agreement",
-        "severity": "moderate",
-        "explanation": "La tercera persona singular requiere “goes”."
-      }
-    ]
-  },
-  "grammarError": null,
-  "pronunciation": {
-    "provider": "azure-speech",
-    "pronunciationScore": 88.4,
-    "accuracyScore": 86.2,
-    "fluencyScore": 80.5,
-    "completenessScore": 100,
-    "prosodyScore": 79.1,
-    "words": []
-  },
-  "pronunciationError": null
+  "generalRationale": "Justificación de la revisión"
 }
 ```
 
-El backend solicita `verbose_json` y marcas por palabra y segmento. Como
-Whisper normaliza repeticiones y palabras sostenidas, FFmpeg también mide los
-silencios de la señal y el backend devuelve una transcripción anotada. Por
-ejemplo, conserva evidencia como `[pausa 0.7 s]` o
-`[alargamiento 1.3 s]` sin inventar letras repetidas que el reconocedor no
-entregó. La transcripción limpia se mantiene en `transcription`; la evidencia
-temporal queda separada en `speechEvidence`. La confianza de reconocimiento no
-es una calificación de pronunciación.
+Las bandas humanas se guardan como etiquetas independientes; no sobrescriben
+el reporte automático. Solo se aceptan cuando la evaluación y su consentimiento
+ya existen en el contenedor privado.
 
-La transcripción limpia y `evaluationPrompt` también se envían a
-`openai/gpt-oss-20b` mediante Groq para detectar errores gramaticales conforme
-al criterio del docente. La instrucción queda delimitada como contexto no
-confiable: no puede cambiar el formato de salida ni solicitar que se alteren
-otras dimensiones. La respuesta usa un esquema JSON estricto y cada error debe
-citar literalmente un fragmento de la transcripción; el backend descarta
-observaciones cuyo fragmento no exista. No se penalizan pausas, pronunciación,
-puntuación ni estilo. Con menos de tres palabras léxicas, la muestra se marca
-como insuficiente y no recibe puntuación gramatical.
+Para retirar un registro:
 
-Si Azure Speech está configurado, el backend convierte otra copia temporal a
-WAV PCM16 mono de 16 kHz y solicita Pronunciation Assessment. La transcripción
-de Groq se utiliza como texto de referencia para obtener puntuaciones por
-audio, palabra y fonema. La API REST de pronunciación admite audios de hasta 30
-segundos.
+```http
+DELETE /api/v2/pilot-records/:assessmentId
+Authorization: Bearer TEACHER_REVIEW_TOKEN
+```
 
-## Desarrollo local
+## Compatibilidad v1
+
+`POST /api/transcriptions` se conserva durante la migración. Devuelve el
+contrato anterior, pero ya no fuerza Grammar a 100 cuando un hallazgo no puede
+verificarse. La aplicación Flutter usa v2; v1 debe considerarse
+transcripción/adaptador y no una evaluación completa.
+
+## Configuración local
 
 Requiere Node.js 20 o superior.
 
 ```bash
 npm install
 cp .env.example .env
-```
-
-Edita `.env` y coloca tu clave:
-
-```dotenv
-GROQ_API_KEY=gsk_tu_clave_real
-GROQ_GRAMMAR_MODEL=openai/gpt-oss-20b
-AZURE_SPEECH_KEY_PRIMARY=key_1
-AZURE_SPEECH_KEY_SECONDARY=key_2
-AZURE_SPEECH_REGION=southcentralus
-AZURE_SPEECH_ENDPOINT=https://tu-recurso.cognitiveservices.azure.com/
-PORT=3000
-CORS_ORIGIN=http://localhost:8080
-```
-
-Luego inicia el servicio:
-
-```bash
 npm run dev
 ```
 
-La clave real queda excluida por `.gitignore`. Nunca la agregues al código ni al
-repositorio.
+Variables obligatorias para producción:
 
-## Configuración en Render
+- `GROQ_API_KEY`
+- `RUBRIC_SIGNING_SECRET`: al menos 32 bytes aleatorios.
+- `AZURE_SPEECH_KEY_PRIMARY`
+- `AZURE_SPEECH_REGION`
+- `CORS_ORIGIN`: dominio exacto del frontend.
 
-Al crear el Web Service usa:
+Recomendadas:
 
-- **Root Directory:** `backend-gordon`
-- **Runtime:** `Node`
-- **Build Command:** `npm ci`
-- **Start Command:** `npm start`
-- **Health Check Path:** `/health`
+- `AZURE_SPEECH_KEY_SECONDARY`: rotación automática en 401/403.
+- `AZURE_SPEECH_ENDPOINT`
+- `GROQ_GRAMMAR_MODEL` (`openai/gpt-oss-20b` por defecto).
+- `TEACHER_REVIEW_TOKEN`: acceso al corpus y calificaciones humanas.
+- `MAX_CONCURRENT_ASSESSMENTS` (`2` por defecto).
+- `RATE_LIMIT_PER_MINUTE` (`30` por defecto).
+- `REQUEST_TIMEOUT_MS` (`480000`, ocho minutos, por defecto).
 
-Agrega esta variable obligatoria en **Environment**:
+Almacenamiento consentido:
 
-- `GROQ_API_KEY`: tu clave privada de Groq.
+- `AZURE_STORAGE_CONNECTION_STRING`
+- `AZURE_STORAGE_CONTAINER` (`gordon-pilot-private` por defecto).
+- `AUDIO_RETENTION_DAYS` (`90` por defecto).
 
-Para obtener pronunciación y rotación automática agrega:
+Sin estas dos variables la evaluación sigue funcionando, pero el backend
+indicará que el registro consentido no se pudo almacenar.
 
-- `AZURE_SPEECH_KEY_PRIMARY`: `KEY 1` del recurso.
-- `AZURE_SPEECH_KEY_SECONDARY`: `KEY 2` del recurso.
-- `AZURE_SPEECH_REGION`: identificador como `southcentralus`.
-- `AZURE_SPEECH_ENDPOINT`: extremo mostrado por Azure.
+## Render
 
-Por compatibilidad, `AZURE_SPEECH_KEY` funciona como clave primaria cuando
-`AZURE_SPEECH_KEY_PRIMARY` no existe.
+- Root Directory: `backend-gordon`
+- Build Command: `npm ci`
+- Start Command: `npm start`
+- Health Check Path: `/health`
+- Runtime: Node 20+
 
-Las siguientes variables son opcionales:
+`/health` confirma que el proceso vive. `/ready` comprueba Groq, FFmpeg, secreto
+de rúbricas, Azure, Blob y CORS sin exponer secretos.
 
-- `GROQ_GRAMMAR_MODEL`: modelo para el análisis gramatical. El valor
-  predeterminado es `openai/gpt-oss-20b`, que admite el esquema JSON estricto
-  usado por el backend.
-- `CORS_ORIGIN`: limita qué frontend puede llamar al backend desde un navegador.
-  Si se omite, el servicio permite cualquier origen (`*`). Cuando el frontend ya
-  esté publicado, es recomendable establecer aquí su URL pública. Se pueden
-  indicar varias URLs separadas por comas.
-- `NODE_VERSION`: `20`
+Render usa disco efímero. Los archivos se crean por solicitud y se eliminan
+antes de responder. Azure Blob es la única persistencia del piloto.
 
-Render proporciona `PORT` automáticamente; el servidor ya escucha esa variable
-en `0.0.0.0`.
+## Privacidad
 
-### Rotación de claves
-
-El backend llama primero con la clave primaria. Solamente si Azure responde
-`401` o `403`, repite una vez con la secundaria. Las claves nunca se incluyen
-en respuestas ni registros.
-
-Para rotarlas sin interrupción:
-
-1. Mantén ambas variables configuradas en Render.
-2. Regenera `KEY 1` en Azure.
-3. Actualiza `AZURE_SPEECH_KEY_PRIMARY` en Render.
-4. Comprueba una evaluación.
-5. Regenera `KEY 2` y actualiza `AZURE_SPEECH_KEY_SECONDARY`.
-
-No regeneres las dos claves al mismo tiempo.
+- Sin consentimiento: audio original y normalizado se eliminan al terminar.
+- Con consentimiento: Blob privado conserva original, normalizado, JSON de
+  proveedores, reporte, consentimiento y ratings.
+- Original y normalizado llevan vencimiento y el backend elimina audio vencido
+  al iniciar y cada seis horas; la retención predeterminada es 90 días.
+- Logs y errores no incluyen audio, transcripción ni claves.
+- El token docente se recibe por encabezado y nunca se devuelve.
 
 ## Pruebas
 
 ```bash
 npm test
+npm run calibration:analyze -- /ruta/al/piloto.jsonl
 ```
 
-Las pruebas usan un cliente Groq simulado: no consumen créditos ni necesitan una
-clave real.
-
-## Conversión de OPUS
-
-Los archivos `.opus` se convierten automáticamente a FLAC mono de 16 kHz antes
-de enviarse a Groq. El proyecto incluye un binario de FFmpeg específico para la
-plataforma mediante `ffmpeg-static`, por lo que Render lo instala junto con las
-dependencias de Node. Tanto el archivo original como el convertido se eliminan
-al terminar, incluso si Groq devuelve un error.
+La suite cubre compatibilidad v1, firma de rúbricas, no redistribución de
+pesos, scores inválidos, formatos y firmas reales, quality gate, abstención
+parcial y contrato síncrono v2. Los proveedores se simulan; para validar
+precisión real se necesita el corpus humano descrito en
+`calibration/README.md`.

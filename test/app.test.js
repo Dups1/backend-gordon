@@ -22,6 +22,12 @@ function clienteGroqFalso(
             score: 100,
             summary: 'No se detectaron errores gramaticales.',
             correctedText: 'Transcripción completada.',
+            pedagogicalRecommendation: {
+              focus: 'Amplía la respuesta.',
+              action: 'Añade dos ejemplos relacionados con la consigna.',
+              rationale:
+                'La muestra es correcta, pero demasiado breve para desarrollar la idea.',
+            },
             errors: [],
           }),
         },
@@ -150,6 +156,12 @@ test('envía el audio a Groq y devuelve la transcripción', async () => {
       score: 100,
       summary: 'No se detectaron errores gramaticales.',
       correctedText: 'Transcripción completada.',
+      pedagogicalRecommendation: {
+        focus: 'Amplía la respuesta.',
+        action: 'Añade dos ejemplos relacionados con la consigna.',
+        rationale:
+          'La muestra es correcta, pero demasiado breve para desarrollar la idea.',
+      },
       errors: [],
     },
     grammarError: null,
@@ -192,6 +204,13 @@ test('detecta errores gramaticales con evidencia literal y descarta inventados',
                 score: 72,
                 summary: 'Hay un error de concordancia.',
                 correctedText: 'She goes to school every day.',
+                pedagogicalRecommendation: {
+                  focus: 'Practica la concordancia verbal.',
+                  action:
+                    'Repite la respuesta cambiando el sujeto y ajustando el verbo.',
+                  rationale:
+                    'La forma “She go” muestra dificultad con la tercera persona.',
+                },
                 errors: [
                   {
                     original: 'She go',
@@ -236,10 +255,18 @@ test('detecta errores gramaticales con evidencia literal y descarta inventados',
     opcionesGramatica.messages[1].content,
     /<instruccion_docente>\nEvalúa concordancia para nivel A2\.\n<\/instruccion_docente>/,
   );
+  assert.match(
+    opcionesGramatica.messages[1].content,
+    /<evidencia_tecnica>\n.*"wordCount":6.*\n<\/evidencia_tecnica>/,
+  );
   assert.equal(opcionesWhisper.prompt, undefined);
   assert.equal(response.body.grammar.score, 72);
   assert.equal(response.body.grammar.errors.length, 1);
   assert.equal(response.body.grammar.errors[0].original, 'She go');
+  assert.equal(
+    response.body.grammar.pedagogicalRecommendation.focus,
+    'Practica la concordancia verbal.',
+  );
   assert.equal(response.body.grammarError, null);
 });
 
@@ -263,20 +290,33 @@ test('anota pausas y alargamientos sin alterar el texto limpio de Whisper', () =
       { word: 'Hello', start: 0, end: 0.45 },
       { word: 'my', start: 0.5, end: 0.75 },
       { word: 'name', start: 0.8, end: 1.15 },
-      { word: 'is', start: 1.2, end: 2.5 },
+      { word: 'is', start: 1.2, end: 2.7 },
       { word: 'David', start: 3.3, end: 3.8 },
     ],
     silencios: [{ start: 2.55, end: 3.25 }],
+    pronunciacion: {
+      words: [
+        {
+          word: 'is',
+          phonemes: [
+            { phoneme: 'ɪ', start: 1.2, duration: 0.2 },
+            { phoneme: 'z', start: 1.4, duration: 1.3 },
+          ],
+        },
+      ],
+    },
   });
 
   assert.equal(
     evidencia.annotatedTranscript,
-    'Hello my name is [alargamiento 1.3 s] [pausa 0.7 s] David',
+    'Hello my name is······· ...... David',
   );
   assert.equal(evidencia.pauses.length, 1);
   assert.equal(evidencia.elongations.length, 1);
   assert.equal(evidencia.elongations[0].word, 'is');
   assert.equal(evidencia.elongations[0].duration, 1.3);
+  assert.equal(evidencia.elongations[0].phoneme, 'z');
+  assert.equal(evidencia.elongations[0].source, 'azure-phoneme-duration');
 });
 
 test('no confunde una pausa pegada al timestamp con un alargamiento', () => {
@@ -292,7 +332,31 @@ test('no confunde una pausa pegada al timestamp con un alargamiento', () => {
 
   assert.equal(evidencia.pauses.length, 1);
   assert.equal(evidencia.elongations.length, 0);
-  assert.match(evidencia.annotatedTranscript, /\[pausa 1\.4 s\]/);
+  assert.match(evidencia.annotatedTranscript, /\.\.\.\.\.\./);
+});
+
+test('alarga el grafema asociado al fonema real y no una letra silenciosa', () => {
+  const evidencia = crearEvidenciaHabla({
+    duracionSegundos: 1.4,
+    palabras: [{ word: 'name', start: 0, end: 1.3 }],
+    silencios: [],
+    pronunciacion: {
+      words: [
+        {
+          word: 'name',
+          phonemes: [
+            { phoneme: 'n', start: 0, duration: 0.1 },
+            { phoneme: 'eɪ', start: 0.1, duration: 1 },
+            { phoneme: 'm', start: 1.1, duration: 0.2 },
+          ],
+        },
+      ],
+    },
+  });
+
+  assert.match(evidencia.annotatedTranscript, /^name·{5}$/);
+  assert.doesNotMatch(evidencia.annotatedTranscript, /[a-z]{2,}$/);
+  assert.equal(evidencia.elongations[0].phoneme, 'eɪ');
 });
 
 test('elimina el archivo temporal aunque Groq responda con error', async () => {
@@ -348,6 +412,7 @@ test('convierte OPUS antes de enviarlo a Groq y limpia ambos archivos', async ()
 
 test('rota a la clave secundaria de Azure ante un error de autenticación', async () => {
   let rutaWav;
+  let configuracionPronunciacion;
   const clavesRecibidas = [];
   const convertirAzure = async (ruta) => {
     rutaWav = `${ruta}.wav`;
@@ -369,6 +434,12 @@ test('rota a la clave secundaria de Azure ante un error de autenticación', asyn
   });
   const azureFetch = async (_url, opciones) => {
     clavesRecibidas.push(opciones.headers['Ocp-Apim-Subscription-Key']);
+    configuracionPronunciacion = JSON.parse(
+      Buffer.from(
+        opciones.headers['Pronunciation-Assessment'],
+        'base64',
+      ).toString('utf8'),
+    );
     if (clavesRecibidas.length === 1) {
       return new Response('{}', { status: 401 });
     }
@@ -384,10 +455,19 @@ test('rota a la clave secundaria de Azure ante un error de autenticación', asyn
           Words: [
             {
               Word: 'morning',
-              AccuracyScore: 72.3,
-              ErrorType: 'Mispronunciation',
+              Offset: 5000000,
+              Duration: 7000000,
+              PronunciationAssessment: {
+                AccuracyScore: 72.3,
+                ErrorType: 'Mispronunciation',
+              },
               Phonemes: [
-                { Phoneme: 'ɔː', AccuracyScore: 61.2 },
+                {
+                  Phoneme: 'ɔː',
+                  Offset: 8000000,
+                  Duration: 4000000,
+                  PronunciationAssessment: { AccuracyScore: 61.2 },
+                },
               ],
             },
           ],
@@ -422,6 +502,7 @@ test('rota a la clave secundaria de Azure ante un error de autenticación', asyn
     'clave-primaria-prueba',
     'clave-secundaria-prueba',
   ]);
+  assert.equal(configuracionPronunciacion.PhonemeAlphabet, 'IPA');
   assert.deepEqual(response.body.pronunciation, {
     provider: 'azure-speech',
     pronunciationScore: 88.4,
@@ -434,7 +515,16 @@ test('rota a la clave secundaria de Azure ante un error de autenticación', asyn
         word: 'morning',
         accuracyScore: 72.3,
         errorType: 'Mispronunciation',
-        phonemes: [{ phoneme: 'ɔː', accuracyScore: 61.2 }],
+        start: 0.5,
+        duration: 0.7,
+        phonemes: [
+          {
+            phoneme: 'ɔː',
+            accuracyScore: 61.2,
+            start: 0.8,
+            duration: 0.4,
+          },
+        ],
       },
     ],
   });

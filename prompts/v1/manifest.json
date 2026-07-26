@@ -1,0 +1,13 @@
+{
+  "promptVersion": "gordon-evidence-v1",
+  "files": {
+    "securityEnvelope": "security-envelope.txt",
+    "rubricCompiler": "rubric-compiler.txt",
+    "evidenceExtractor": "evidence-extractor.txt",
+    "analyticJudge": "analytic-judge.txt",
+    "holisticJudge": "holistic-judge.txt",
+    "adjudicator": "adjudicator.txt",
+    "feedbackGenerator": "feedback-generator.txt"
+  },
+  "examples": "examples.json"
+}
