@@ -249,7 +249,8 @@ function linguisticDimension({
       status: 'insufficientEvidence',
       methodId: 'gpt-oss-double-judge',
       reliability: 'unknown',
-      reasonCode: 'INSUFFICIENT_LINGUISTIC_EVIDENCE',
+      reasonCode:
+        item?.reasonCode ?? 'INSUFFICIENT_LINGUISTIC_EVIDENCE',
       evidence: (evidence?.findings ?? []).filter(
         (finding) => finding.dimension === id,
       ),

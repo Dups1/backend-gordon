@@ -547,7 +547,22 @@ export async function extractLinguisticEvidence({
   };
 }
 
-function normalizeJudge(raw, validEvidenceIds) {
+function normalizeJudge(raw, findings) {
+  const evidenceIdsByDimension = Object.fromEntries(
+    LINGUISTIC_DIMENSIONS.map((id) => [
+      id,
+      (Array.isArray(findings) ? findings : [])
+        .filter(
+          (finding) =>
+            finding?.dimension === id &&
+            typeof finding?.id === 'string' &&
+            finding.id.trim(),
+        )
+        .map((finding) => finding.id.trim())
+        .filter((id, index, ids) => ids.indexOf(id) === index)
+        .slice(0, 12),
+    ]),
+  );
   const byId = {};
   for (const item of Array.isArray(raw?.dimensions) ? raw.dimensions : []) {
     if (
@@ -561,17 +576,39 @@ function normalizeJudge(raw, validEvidenceIds) {
       Number.isInteger(item.band) && item.band >= 0 && item.band <= 4
         ? item.band
         : 0;
-    const evidenceIds = Array.isArray(item.evidenceIds)
-      ? item.evidenceIds.filter((id) => validEvidenceIds.has(id)).slice(0, 12)
+    const availableEvidenceIds = evidenceIdsByDimension[item.id];
+    const availableEvidenceSet = new Set(availableEvidenceIds);
+    const citedEvidenceIds = Array.isArray(item.evidenceIds)
+      ? item.evidenceIds
+          .filter((id) => typeof id === 'string')
+          .map((id) => id.trim())
+          .filter((id) => availableEvidenceSet.has(id))
+          .filter((id, index, ids) => ids.indexOf(id) === index)
+          .slice(0, 12)
       : [];
+    const citationRepaired =
+      item.status === 'scored' &&
+      citedEvidenceIds.length === 0 &&
+      availableEvidenceIds.length > 0;
+    const evidenceIds = citationRepaired
+      ? availableEvidenceIds
+      : citedEvidenceIds;
+    const status =
+      item.status === 'scored' && evidenceIds.length
+        ? 'scored'
+        : 'insufficientEvidence';
     byId[item.id] = {
       id: item.id,
-      status:
-        item.status === 'scored' && evidenceIds.length
-          ? 'scored'
-          : 'insufficientEvidence',
+      status,
       band,
       evidenceIds,
+      citationRepaired,
+      reasonCode:
+        status === 'scored'
+          ? null
+          : item.status === 'scored'
+            ? 'JUDGE_EVIDENCE_NOT_CITED'
+            : 'INSUFFICIENT_LINGUISTIC_EVIDENCE',
       rationale:
         typeof item.rationale === 'string' ? item.rationale.trim() : '',
     };
@@ -584,6 +621,8 @@ function normalizeJudge(raw, validEvidenceIds) {
         status: 'insufficientEvidence',
         band: 0,
         evidenceIds: [],
+        citationRepaired: false,
+        reasonCode: 'JUDGE_DIMENSION_MISSING',
         rationale: 'El juez no produjo evidencia verificable.',
       },
     ]),
@@ -616,7 +655,7 @@ async function runJudge({
       },
     },
   });
-  return normalizeJudge(raw, new Set(evidence.findings.map((item) => item.id)));
+  return normalizeJudge(raw, evidence.findings);
 }
 
 async function adjudicate({
@@ -636,7 +675,7 @@ async function adjudicate({
     system: INTERNAL_PROMPTS.adjudicator,
     payload: { rubric, evidence, analytic, holistic, disputedIds },
   });
-  return normalizeJudge(raw, new Set(evidence.findings.map((item) => item.id)));
+  return normalizeJudge(raw, evidence.findings);
 }
 
 export async function runDoubleLinguisticJudging({
@@ -657,6 +696,10 @@ export async function runDoubleLinguisticJudging({
             interval90: null,
             evidenceIds: [],
             rationale: evidence.summary,
+            reasonCode:
+              evidence.sufficiency?.sufficient === false
+                ? 'INSUFFICIENT_LINGUISTIC_SAMPLE'
+                : 'INSUFFICIENT_LINGUISTIC_EVIDENCE',
             judgeAgreement: null,
             reviewRequired: true,
           },
@@ -718,6 +761,11 @@ export async function runDoubleLinguisticJudging({
         interval90: null,
         evidenceIds: [...new Set([...a.evidenceIds, ...b.evidenceIds])],
         rationale: final?.rationale ?? `${a.rationale} ${b.rationale}`.trim(),
+        reasonCode:
+          final?.reasonCode ??
+          a.reasonCode ??
+          b.reasonCode ??
+          'INSUFFICIENT_LINGUISTIC_EVIDENCE',
         judgeAgreement: false,
         reviewRequired: true,
       };
@@ -748,7 +796,11 @@ export async function runDoubleLinguisticJudging({
       rationale: final?.rationale ?? `${a.rationale} ${b.rationale}`.trim(),
       judgeAgreement: a.band === b.band,
       judgeBands: { analytic: a.band, holistic: b.band, adjudicated: final?.band },
-      reviewRequired: disputedIds.includes(id),
+      reviewRequired:
+        disputedIds.includes(id) ||
+        a.citationRepaired ||
+        b.citationRepaired ||
+        final?.citationRepaired === true,
     };
   }
   return {

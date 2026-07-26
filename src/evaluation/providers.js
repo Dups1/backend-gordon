@@ -524,6 +524,19 @@ function aggregateAzureChunks(chunks, { mode, locale, referenceText }) {
   };
 }
 
+export function createContinuousPronunciationConfig(sdk, locale) {
+  const pronunciation = new sdk.PronunciationAssessmentConfig(
+    '',
+    sdk.PronunciationAssessmentGradingSystem.HundredMark,
+    sdk.PronunciationAssessmentGranularity.Phoneme,
+    false,
+  );
+  pronunciation.enableProsodyAssessment = locale === 'en-US';
+  pronunciation.phonemeAlphabet = 'IPA';
+  pronunciation.nbestPhonemeCount = 5;
+  return pronunciation;
+}
+
 async function recognizeContinuousWithKey({
   key,
   region,
@@ -549,15 +562,7 @@ async function recognizeContinuousWithKey({
     await readFile(normalizedPath),
   );
   const recognizer = new sdk.SpeechRecognizer(speechConfig, audioConfig);
-  const pronunciation = new sdk.PronunciationAssessmentConfig(
-    '',
-    sdk.PronunciationAssessmentGradingSystem.HundredMark,
-    sdk.PronunciationAssessmentGranularity.Phoneme,
-    false,
-  );
-  pronunciation.enableProsodyAssessment();
-  pronunciation.phonemeAlphabet = 'IPA';
-  pronunciation.nbestPhonemeCount = 5;
+  const pronunciation = createContinuousPronunciationConfig(sdk, locale);
   pronunciation.applyTo(recognizer);
   return new Promise((resolve, reject) => {
     const rawResults = [];
