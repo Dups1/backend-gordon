@@ -4,13 +4,40 @@ import test from 'node:test';
 
 import request from 'supertest';
 
-import { createApp, crearEvidenciaHabla, GROQ_MODEL } from '../src/app.js';
+import {
+  createApp,
+  crearEvidenciaHabla,
+  GROQ_GRAMMAR_MODEL,
+  GROQ_MODEL,
+} from '../src/app.js';
 
-function clienteGroqFalso(crearTranscripcion) {
+function clienteGroqFalso(
+  crearTranscripcion,
+  crearAnalisis = async () => ({
+    choices: [
+      {
+        message: {
+          content: JSON.stringify({
+            sufficientEvidence: true,
+            score: 100,
+            summary: 'No se detectaron errores gramaticales.',
+            correctedText: 'Transcripción completada.',
+            errors: [],
+          }),
+        },
+      },
+    ],
+  }),
+) {
   return {
     audio: {
       transcriptions: {
         create: crearTranscripcion,
+      },
+    },
+    chat: {
+      completions: {
+        create: crearAnalisis,
       },
     },
   };
@@ -116,10 +143,96 @@ test('envía el audio a Groq y devuelve la transcripción', async () => {
       },
     ],
     speechEvidence: null,
+    grammar: {
+      provider: 'groq',
+      model: GROQ_GRAMMAR_MODEL,
+      sufficientEvidence: true,
+      score: 100,
+      summary: 'No se detectaron errores gramaticales.',
+      correctedText: 'Transcripción completada.',
+      errors: [],
+    },
+    grammarError: null,
     pronunciation: null,
     pronunciationError: null,
   });
   await assert.rejects(access(rutaTemporal));
+});
+
+test('detecta errores gramaticales con evidencia literal y descarta inventados', async () => {
+  let opcionesGramatica;
+  const groqClient = clienteGroqFalso(
+    async (opciones) => {
+      opciones.file.destroy();
+      return {
+        text: 'She go to school every day.',
+        language: 'English',
+        duration: 2,
+        words: [
+          { word: 'She', start: 0, end: 0.2 },
+          { word: 'go', start: 0.3, end: 0.5 },
+          { word: 'to', start: 0.6, end: 0.7 },
+          { word: 'school', start: 0.8, end: 1.1 },
+          { word: 'every', start: 1.2, end: 1.5 },
+          { word: 'day.', start: 1.6, end: 1.9 },
+        ],
+        segments: [],
+      };
+    },
+    async (opciones) => {
+      opcionesGramatica = opciones;
+      return {
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                sufficientEvidence: true,
+                score: 72,
+                summary: 'Hay un error de concordancia.',
+                correctedText: 'She goes to school every day.',
+                errors: [
+                  {
+                    original: 'She go',
+                    correction: 'She goes',
+                    category: 'Subject-verb agreement',
+                    severity: 'moderate',
+                    explanation:
+                      'La tercera persona singular requiere “goes”.',
+                  },
+                  {
+                    original: 'I has',
+                    correction: 'I have',
+                    category: 'Agreement',
+                    severity: 'major',
+                    explanation: 'Este fragmento no existe.',
+                  },
+                ],
+              }),
+            },
+          },
+        ],
+      };
+    },
+  );
+
+  const response = await request(createApp({ groqClient }))
+    .post('/api/transcriptions')
+    .field('language', 'en')
+    .attach('audio', Buffer.from('audio simulado'), {
+      filename: 'gramatica.wav',
+      contentType: 'audio/wav',
+    })
+    .expect(200);
+
+  assert.equal(opcionesGramatica.model, GROQ_GRAMMAR_MODEL);
+  assert.equal(
+    opcionesGramatica.response_format.json_schema.strict,
+    true,
+  );
+  assert.equal(response.body.grammar.score, 72);
+  assert.equal(response.body.grammar.errors.length, 1);
+  assert.equal(response.body.grammar.errors[0].original, 'She go');
+  assert.equal(response.body.grammarError, null);
 });
 
 test('anota pausas y alargamientos sin alterar el texto limpio de Whisper', () => {

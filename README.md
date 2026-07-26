@@ -68,6 +68,24 @@ Respuesta:
     ],
     "method": "ffmpeg-silencedetect+whisper-word-timestamps"
   },
+  "grammar": {
+    "provider": "groq",
+    "model": "openai/gpt-oss-20b",
+    "sufficientEvidence": true,
+    "score": 72,
+    "summary": "Hay un error de concordancia.",
+    "correctedText": "She goes to school every day.",
+    "errors": [
+      {
+        "original": "She go",
+        "correction": "She goes",
+        "category": "Subject-verb agreement",
+        "severity": "moderate",
+        "explanation": "La tercera persona singular requiere “goes”."
+      }
+    ]
+  },
+  "grammarError": null,
   "pronunciation": {
     "provider": "azure-speech",
     "pronunciationScore": 88.4,
@@ -90,6 +108,13 @@ entregó. La transcripción limpia se mantiene en `transcription`; la evidencia
 temporal queda separada en `speechEvidence`. La confianza de reconocimiento no
 es una calificación de pronunciación.
 
+La transcripción limpia también se envía a `openai/gpt-oss-20b` mediante Groq
+para detectar errores gramaticales. La respuesta usa un esquema JSON estricto y
+cada error debe citar literalmente un fragmento de la transcripción; el backend
+descarta observaciones cuyo fragmento no exista. No se penalizan pausas,
+pronunciación, puntuación ni estilo. Con menos de tres palabras léxicas, la
+muestra se marca como insuficiente y no recibe puntuación gramatical.
+
 Si Azure Speech está configurado, el backend convierte otra copia temporal a
 WAV PCM16 mono de 16 kHz y solicita Pronunciation Assessment. La transcripción
 de Groq se utiliza como texto de referencia para obtener puntuaciones por
@@ -109,6 +134,7 @@ Edita `.env` y coloca tu clave:
 
 ```dotenv
 GROQ_API_KEY=gsk_tu_clave_real
+GROQ_GRAMMAR_MODEL=openai/gpt-oss-20b
 AZURE_SPEECH_KEY_PRIMARY=key_1
 AZURE_SPEECH_KEY_SECONDARY=key_2
 AZURE_SPEECH_REGION=southcentralus
@@ -152,6 +178,9 @@ Por compatibilidad, `AZURE_SPEECH_KEY` funciona como clave primaria cuando
 
 Las siguientes variables son opcionales:
 
+- `GROQ_GRAMMAR_MODEL`: modelo para el análisis gramatical. El valor
+  predeterminado es `openai/gpt-oss-20b`, que admite el esquema JSON estricto
+  usado por el backend.
 - `CORS_ORIGIN`: limita qué frontend puede llamar al backend desde un navegador.
   Si se omite, el servicio permite cualquier origen (`*`). Cuando el frontend ya
   esté publicado, es recomendable establecer aquí su URL pública. Se pueden
