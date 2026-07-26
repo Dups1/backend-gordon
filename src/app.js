@@ -15,6 +15,8 @@ import multer from 'multer';
 export const GROQ_MODEL = 'whisper-large-v3';
 export const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
 export const MAX_AZURE_PRONUNCIATION_SECONDS = 30;
+export const MIN_PAUSE_SECONDS = 0.6;
+export const MIN_ELONGATION_SECONDS = 0.9;
 
 const extensionesAdmitidas = new Set([
   '.flac',
@@ -299,6 +301,229 @@ export async function convertirAudioAWav(
   }
 }
 
+export async function detectarSilenciosAudio(
+  rutaEntrada,
+  {
+    binario = ffmpegPath,
+    duracionSegundos = 0,
+    tiempoLimiteMs = 60000,
+  } = {},
+) {
+  if (!binario) {
+    throw new ErrorHttp(
+      503,
+      'El analizador de audio no está disponible.',
+      'FFMPEG_NO_DISPONIBLE',
+    );
+  }
+
+  const argumentos = [
+    '-nostdin',
+    '-hide_banner',
+    '-i',
+    rutaEntrada,
+    '-af',
+    'silencedetect=noise=-35dB:d=0.35',
+    '-f',
+    'null',
+    '-',
+  ];
+
+  return new Promise((resolve, reject) => {
+    const proceso = spawn(binario, argumentos, {
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    let diagnostico = '';
+    let excedioTiempo = false;
+    const temporizador = setTimeout(() => {
+      excedioTiempo = true;
+      proceso.kill('SIGKILL');
+    }, tiempoLimiteMs);
+
+    proceso.stderr.setEncoding('utf8');
+    proceso.stderr.on('data', (fragmento) => {
+      if (diagnostico.length < 1024 * 1024) {
+        diagnostico += fragmento;
+      }
+    });
+    proceso.once('error', () => {
+      clearTimeout(temporizador);
+      reject(
+        new ErrorHttp(
+          503,
+          'No fue posible iniciar el analizador de audio.',
+          'FFMPEG_NO_DISPONIBLE',
+        ),
+      );
+    });
+    proceso.once('close', (codigo) => {
+      clearTimeout(temporizador);
+      if (excedioTiempo) {
+        reject(
+          new ErrorHttp(
+            504,
+            'El análisis temporal del audio tardó demasiado.',
+            'ANALISIS_AUDIO_AGOTADO',
+          ),
+        );
+        return;
+      }
+      if (codigo !== 0) {
+        reject(
+          new ErrorHttp(
+            422,
+            'No fue posible medir los silencios del audio.',
+            'AUDIO_INVALIDO',
+          ),
+        );
+        return;
+      }
+
+      const silencios = [];
+      const inicios = [
+        ...diagnostico.matchAll(/silence_start:\s*([0-9.]+)/g),
+      ].map((coincidencia) => Number(coincidencia[1]));
+      const finales = [
+        ...diagnostico.matchAll(
+          /silence_end:\s*([0-9.]+)\s*\|\s*silence_duration:\s*([0-9.]+)/g,
+        ),
+      ];
+      for (let indice = 0; indice < finales.length; indice++) {
+        const fin = Number(finales[indice][1]);
+        const duracion = Number(finales[indice][2]);
+        const inicio = Number.isFinite(inicios[indice])
+          ? inicios[indice]
+          : fin - duracion;
+        if (Number.isFinite(inicio) && Number.isFinite(fin) && fin > inicio) {
+          silencios.push({ start: Math.max(0, inicio), end: fin });
+        }
+      }
+      if (inicios.length > finales.length && duracionSegundos > 0) {
+        const inicio = inicios.at(-1);
+        if (Number.isFinite(inicio) && duracionSegundos > inicio) {
+          silencios.push({ start: inicio, end: duracionSegundos });
+        }
+      }
+      resolve(silencios);
+    });
+  });
+}
+
+function interseccionSegundos(inicio, fin, silencios) {
+  return silencios.reduce((total, silencio) => {
+    const interseccion =
+      Math.min(fin, silencio.end) - Math.max(inicio, silencio.start);
+    return total + Math.max(0, interseccion);
+  }, 0);
+}
+
+function letrasDePalabra(texto) {
+  return [...texto].filter((caracter) => /\p{L}/u.test(caracter)).length;
+}
+
+export function crearEvidenciaHabla({
+  palabras,
+  silencios,
+  duracionSegundos,
+}) {
+  if (!Array.isArray(palabras) || palabras.length === 0) {
+    return null;
+  }
+  const ordenadas = [...palabras].sort((a, b) => a.start - b.start);
+  const inicioVoz = ordenadas[0].start;
+  const finVoz = ordenadas.at(-1).end;
+  const pausas = (Array.isArray(silencios) ? silencios : [])
+    .map((silencio) => ({
+      start: Math.max(inicioVoz, silencio.start),
+      end: Math.min(finVoz, silencio.end),
+    }))
+    .filter(
+      (silencio) =>
+        silencio.end - silencio.start >= MIN_PAUSE_SECONDS &&
+        silencio.end > silencio.start,
+    )
+    .map((silencio) => ({
+      ...silencio,
+      duration: silencio.end - silencio.start,
+    }));
+
+  const alargamientos = ordenadas
+    .map((palabra, indice) => {
+      const duracion = palabra.end - palabra.start;
+      const silencio = interseccionSegundos(
+        palabra.start,
+        palabra.end,
+        pausas,
+      );
+      const duracionConVoz = Math.max(0, duracion - silencio);
+      const cantidadLetras = Math.max(1, letrasDePalabra(palabra.word));
+      const duracionEsperada = Math.max(0.22, cantidadLetras * 0.09);
+      const esAlargamiento =
+        duracionConVoz >= MIN_ELONGATION_SECONDS &&
+        duracionConVoz >= duracionEsperada * 2.2;
+      if (!esAlargamiento) return null;
+      return {
+        word: palabra.word,
+        wordIndex: indice,
+        start: palabra.start,
+        end: palabra.end,
+        duration: duracionConVoz,
+      };
+    })
+    .filter(Boolean);
+
+  const anotaciones = [];
+  let indicePausa = 0;
+  for (let indice = 0; indice < ordenadas.length; indice++) {
+    const palabra = ordenadas[indice];
+    while (
+      indicePausa < pausas.length &&
+      pausas[indicePausa].end <= palabra.end
+    ) {
+      anotaciones.push(
+        `[pausa ${pausas[indicePausa].duration.toFixed(1)} s]`,
+      );
+      indicePausa++;
+    }
+    anotaciones.push(palabra.word);
+    const alargamiento = alargamientos.find(
+      (elemento) => elemento.wordIndex === indice,
+    );
+    if (alargamiento) {
+      anotaciones.push(
+        `[alargamiento ${alargamiento.duration.toFixed(1)} s]`,
+      );
+    }
+  }
+  while (indicePausa < pausas.length) {
+    anotaciones.push(`[pausa ${pausas[indicePausa].duration.toFixed(1)} s]`);
+    indicePausa++;
+  }
+
+  return {
+    annotatedTranscript: anotaciones.join(' '),
+    pauses: pausas,
+    elongations: alargamientos.map(({ wordIndex, ...elemento }) => elemento),
+    method: 'ffmpeg-silencedetect+whisper-word-timestamps',
+    duration: duracionSegundos,
+  };
+}
+
+export async function analizarEvidenciaHablaAudio({
+  rutaAudio,
+  palabras,
+  duracionSegundos,
+}) {
+  const silencios = await detectarSilenciosAudio(rutaAudio, {
+    duracionSegundos,
+  });
+  return crearEvidenciaHabla({
+    palabras,
+    silencios,
+    duracionSegundos,
+  });
+}
+
 function crearConfiguracionCors(origenesConfigurados) {
   if (!origenesConfigurados || origenesConfigurados.trim() === '*') {
     return { origin: '*' };
@@ -511,6 +736,28 @@ function validarIdioma(valor) {
   return idioma;
 }
 
+function localeAzure(idiomaSolicitado, idiomaDetectado) {
+  const idioma = (idiomaSolicitado || idiomaDetectado || '')
+    .trim()
+    .toLowerCase();
+  const locales = {
+    en: 'en-US',
+    english: 'en-US',
+    es: 'es-MX',
+    spanish: 'es-MX',
+    español: 'es-MX',
+    fr: 'fr-FR',
+    french: 'fr-FR',
+    de: 'de-DE',
+    german: 'de-DE',
+    it: 'it-IT',
+    italian: 'it-IT',
+    pt: 'pt-BR',
+    portuguese: 'pt-BR',
+  };
+  return locales[idioma] ?? 'en-US';
+}
+
 function errorDeGroq(error) {
   if (error?.status === 429) {
     return new ErrorHttp(
@@ -535,6 +782,7 @@ export function createApp({
   maxAudioBytes = MAX_AUDIO_BYTES,
   convertirOpus = convertirOpusAFlac,
   convertirAzure = convertirAudioAWav,
+  analizarHabla = analizarEvidenciaHablaAudio,
 } = {}) {
   const app = express();
   const subirAudio = crearSubida(maxAudioBytes);
@@ -618,7 +866,7 @@ export function createApp({
             pronunciacion = await evaluarPronunciacionAzure({
               rutaWav: rutaAzure,
               textoReferencia: resultado.text.trim(),
-              idioma: language === 'en' || !language ? 'en-US' : language,
+              idioma: localeAzure(language, resultado.language),
               configuracion: configuracionAzure,
               fetchImpl: azureFetch,
             });
@@ -681,20 +929,48 @@ export function createApp({
           (maximo, elemento) => Math.max(maximo, elemento.end ?? 0),
           0,
         );
+        const duracion = numeroFinito(resultado.duration) ?? ultimaMarca;
+        let evidenciaHabla = null;
+        if (palabras.length > 0 && duracion > 0) {
+          try {
+            evidenciaHabla = await analizarHabla({
+              rutaAudio: request.file.path,
+              palabras,
+              duracionSegundos: duracion,
+            });
+          } catch {
+            // La transcripción sigue siendo útil si el análisis acústico
+            // complementario no está disponible para un archivo concreto.
+          }
+        }
 
-        response.json({
+        const cuerpoRespuesta = {
           transcription: resultado.text,
           model: GROQ_MODEL,
           language:
             typeof resultado.language === 'string'
               ? resultado.language
               : language || null,
-          duration: numeroFinito(resultado.duration) ?? ultimaMarca,
+          duration: duracion,
           words: palabras,
           segments: segmentos,
+          speechEvidence: evidenciaHabla,
           pronunciation: pronunciacion,
           pronunciationError: errorPronunciacion,
-        });
+        };
+
+        // Termina la limpieza antes de responder para no dejar archivos de
+        // audio accesibles durante unos milisegundos después de la solicitud.
+        await unlink(request.file.path).catch(() => {});
+        if (rutaConvertida) {
+          await unlink(rutaConvertida).catch(() => {});
+          rutaConvertida = null;
+        }
+        if (rutaAzure) {
+          await unlink(rutaAzure).catch(() => {});
+          rutaAzure = null;
+        }
+        response.json(cuerpoRespuesta);
       } catch (error) {
         next(error);
       } finally {

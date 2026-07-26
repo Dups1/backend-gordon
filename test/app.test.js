@@ -4,7 +4,7 @@ import test from 'node:test';
 
 import request from 'supertest';
 
-import { createApp, GROQ_MODEL } from '../src/app.js';
+import { createApp, crearEvidenciaHabla, GROQ_MODEL } from '../src/app.js';
 
 function clienteGroqFalso(crearTranscripcion) {
   return {
@@ -115,10 +115,50 @@ test('envía el audio a Groq y devuelve la transcripción', async () => {
         noSpeechProb: 0.04,
       },
     ],
+    speechEvidence: null,
     pronunciation: null,
     pronunciationError: null,
   });
   await assert.rejects(access(rutaTemporal));
+});
+
+test('anota pausas y alargamientos sin alterar el texto limpio de Whisper', () => {
+  const evidencia = crearEvidenciaHabla({
+    duracionSegundos: 4,
+    palabras: [
+      { word: 'Hello', start: 0, end: 0.45 },
+      { word: 'my', start: 0.5, end: 0.75 },
+      { word: 'name', start: 0.8, end: 1.15 },
+      { word: 'is', start: 1.2, end: 2.5 },
+      { word: 'David', start: 3.3, end: 3.8 },
+    ],
+    silencios: [{ start: 2.55, end: 3.25 }],
+  });
+
+  assert.equal(
+    evidencia.annotatedTranscript,
+    'Hello my name is [alargamiento 1.3 s] [pausa 0.7 s] David',
+  );
+  assert.equal(evidencia.pauses.length, 1);
+  assert.equal(evidencia.elongations.length, 1);
+  assert.equal(evidencia.elongations[0].word, 'is');
+  assert.equal(evidencia.elongations[0].duration, 1.3);
+});
+
+test('no confunde una pausa pegada al timestamp con un alargamiento', () => {
+  const evidencia = crearEvidenciaHabla({
+    duracionSegundos: 3.2,
+    palabras: [
+      { word: 'I', start: 0, end: 0.2 },
+      { word: 'will', start: 0.25, end: 0.55 },
+      { word: 'continue', start: 0.6, end: 2.8 },
+    ],
+    silencios: [{ start: 0.6, end: 2.05 }],
+  });
+
+  assert.equal(evidencia.pauses.length, 1);
+  assert.equal(evidencia.elongations.length, 0);
+  assert.match(evidencia.annotatedTranscript, /\[pausa 1\.4 s\]/);
 });
 
 test('elimina el archivo temporal aunque Groq responda con error', async () => {
@@ -270,6 +310,71 @@ test('rota a la clave secundaria de Azure ante un error de autenticación', asyn
     /clave-(primaria|secundaria)-prueba/,
   );
   await assert.rejects(access(rutaWav));
+});
+
+test('detecta español sin forzar inglés y evalúa con el locale es-MX', async () => {
+  let opcionesGroq;
+  let endpointAzure;
+  const convertirAzure = async (ruta) => {
+    const rutaWav = `${ruta}.wav`;
+    await copyFile(ruta, rutaWav);
+    return rutaWav;
+  };
+  const groqClient = clienteGroqFalso(async (opciones) => {
+    opcionesGroq = opciones;
+    opciones.file.destroy();
+    return {
+      text: 'Buenos días, quiero explicar mi proyecto.',
+      language: 'Spanish',
+      duration: 3,
+      words: [
+        { word: 'Buenos', start: 0, end: 0.5 },
+        { word: 'días,', start: 0.5, end: 0.9 },
+      ],
+      segments: [],
+    };
+  });
+  const azureFetch = async (url) => {
+    endpointAzure = url;
+    return Response.json({
+      RecognitionStatus: 'Success',
+      NBest: [
+        {
+          PronScore: 91,
+          AccuracyScore: 92,
+          FluencyScore: 89,
+          Words: [],
+        },
+      ],
+    });
+  };
+
+  const response = await request(
+    createApp({
+      groqClient,
+      convertirAzure,
+      azureFetch,
+      azureConfig: {
+        clavePrimaria: 'primaria',
+        region: 'southcentralus',
+      },
+    }),
+  )
+    .post('/api/transcriptions')
+    .attach('audio', Buffer.from('audio simulado'), {
+      filename: 'grabacion.wav',
+      contentType: 'audio/wav',
+    })
+    .expect(200);
+
+  assert.equal(opcionesGroq.language, undefined);
+  assert.equal(endpointAzure.searchParams.get('language'), 'es-MX');
+  assert.equal(response.body.language, 'Spanish');
+  assert.equal(
+    response.body.transcription,
+    'Buenos días, quiero explicar mi proyecto.',
+  );
+  assert.equal(response.body.pronunciation.pronunciationScore, 91);
 });
 
 test('no rota claves de Azure ante errores ajenos a autenticación', async () => {

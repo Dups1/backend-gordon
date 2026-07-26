@@ -18,6 +18,10 @@ Recibe `multipart/form-data`:
 - `language` (opcional): código ISO-639-1, por ejemplo `es` o `en`.
 - `prompt` (opcional): contexto que puede orientar la transcripción.
 
+Si `language` se omite, Groq detecta el idioma del audio. El backend conserva
+esa transcripción y asigna a Azure el locale correspondiente; por ejemplo,
+`Spanish` se evalúa como `es-MX` y `English` como `en-US`.
+
 Ejemplo:
 
 ```bash
@@ -49,6 +53,21 @@ Respuesta:
       "noSpeechProb": 0.04
     }
   ],
+  "speechEvidence": {
+    "annotatedTranscript": "Hello, my name is [alargamiento 1.3 s] [pausa 0.7 s] David.",
+    "pauses": [
+      { "start": 2.55, "end": 3.25, "duration": 0.7 }
+    ],
+    "elongations": [
+      {
+        "word": "is",
+        "start": 1.2,
+        "end": 2.5,
+        "duration": 1.3
+      }
+    ],
+    "method": "ffmpeg-silencedetect+whisper-word-timestamps"
+  },
   "pronunciation": {
     "provider": "azure-speech",
     "pronunciationScore": 88.4,
@@ -62,10 +81,14 @@ Respuesta:
 }
 ```
 
-El backend solicita `verbose_json` y marcas por palabra y segmento. Estas
-marcas permiten observar pausas, duración y ritmo aunque Whisper normalice la
-frase al escribirla. La confianza de reconocimiento no es una calificación de
-pronunciación.
+El backend solicita `verbose_json` y marcas por palabra y segmento. Como
+Whisper normaliza repeticiones y palabras sostenidas, FFmpeg también mide los
+silencios de la señal y el backend devuelve una transcripción anotada. Por
+ejemplo, conserva evidencia como `[pausa 0.7 s]` o
+`[alargamiento 1.3 s]` sin inventar letras repetidas que el reconocedor no
+entregó. La transcripción limpia se mantiene en `transcription`; la evidencia
+temporal queda separada en `speechEvidence`. La confianza de reconocimiento no
+es una calificación de pronunciación.
 
 Si Azure Speech está configurado, el backend convierte otra copia temporal a
 WAV PCM16 mono de 16 kHz y solicita Pronunciation Assessment. La transcripción
