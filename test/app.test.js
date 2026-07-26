@@ -54,7 +54,26 @@ test('envía el audio a Groq y devuelve la transcripción', async () => {
     rutaTemporal = opciones.file.path;
     assert.equal((await readFile(rutaTemporal)).toString(), 'audio simulado');
     opciones.file.destroy();
-    return { text: 'Transcripción completada.' };
+    return {
+      text: 'Transcripción completada.',
+      language: 'es',
+      duration: 3.4,
+      words: [
+        { word: 'Transcripción', start: 0.2, end: 1.1 },
+        { word: 'completada.', start: 2.1, end: 3.1 },
+      ],
+      segments: [
+        {
+          id: 0,
+          text: 'Transcripción completada.',
+          start: 0.2,
+          end: 3.1,
+          avg_logprob: -0.24,
+          compression_ratio: 1.18,
+          no_speech_prob: 0.04,
+        },
+      ],
+    };
   });
 
   const response = await request(createApp({ groqClient }))
@@ -70,12 +89,32 @@ test('envía el audio a Groq y devuelve la transcripción', async () => {
   assert.equal(opcionesRecibidas.model, 'whisper-large-v3');
   assert.equal(opcionesRecibidas.language, 'es');
   assert.equal(opcionesRecibidas.prompt, 'Conversación académica');
-  assert.equal(opcionesRecibidas.response_format, 'json');
+  assert.equal(opcionesRecibidas.response_format, 'verbose_json');
+  assert.deepEqual(opcionesRecibidas.timestamp_granularities, [
+    'word',
+    'segment',
+  ]);
   assert.equal(opcionesRecibidas.temperature, 0);
   assert.deepEqual(response.body, {
     transcription: 'Transcripción completada.',
     model: 'whisper-large-v3',
     language: 'es',
+    duration: 3.4,
+    words: [
+      { word: 'Transcripción', start: 0.2, end: 1.1 },
+      { word: 'completada.', start: 2.1, end: 3.1 },
+    ],
+    segments: [
+      {
+        id: 0,
+        text: 'Transcripción completada.',
+        start: 0.2,
+        end: 3.1,
+        avgLogprob: -0.24,
+        compressionRatio: 1.18,
+        noSpeechProb: 0.04,
+      },
+    ],
   });
   await assert.rejects(access(rutaTemporal));
 });

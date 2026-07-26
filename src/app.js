@@ -323,7 +323,8 @@ export function createApp({
         const opciones = {
           file: createReadStream(rutaParaTranscribir),
           model: GROQ_MODEL,
-          response_format: 'json',
+          response_format: 'verbose_json',
+          timestamp_granularities: ['word', 'segment'],
           temperature: 0,
         };
 
@@ -341,10 +342,57 @@ export function createApp({
           throw errorDeGroq(error);
         }
 
+        const numeroFinito = (valor) =>
+          typeof valor === 'number' && Number.isFinite(valor) ? valor : null;
+        const palabras = Array.isArray(resultado.words)
+          ? resultado.words
+              .map((palabra) => ({
+                word:
+                  typeof palabra.word === 'string' ? palabra.word.trim() : '',
+                start: numeroFinito(palabra.start),
+                end: numeroFinito(palabra.end),
+              }))
+              .filter(
+                (palabra) =>
+                  palabra.word &&
+                  palabra.start !== null &&
+                  palabra.end !== null,
+              )
+          : [];
+        const segmentos = Array.isArray(resultado.segments)
+          ? resultado.segments
+              .map((segmento) => ({
+                id: Number.isInteger(segmento.id) ? segmento.id : null,
+                text:
+                  typeof segmento.text === 'string'
+                    ? segmento.text.trim()
+                    : '',
+                start: numeroFinito(segmento.start),
+                end: numeroFinito(segmento.end),
+                avgLogprob: numeroFinito(segmento.avg_logprob),
+                compressionRatio: numeroFinito(segmento.compression_ratio),
+                noSpeechProb: numeroFinito(segmento.no_speech_prob),
+              }))
+              .filter(
+                (segmento) =>
+                  segmento.start !== null && segmento.end !== null,
+              )
+          : [];
+        const ultimaMarca = [...palabras, ...segmentos].reduce(
+          (maximo, elemento) => Math.max(maximo, elemento.end ?? 0),
+          0,
+        );
+
         response.json({
           transcription: resultado.text,
           model: GROQ_MODEL,
-          language: language || null,
+          language:
+            typeof resultado.language === 'string'
+              ? resultado.language
+              : language || null,
+          duration: numeroFinito(resultado.duration) ?? ultimaMarca,
+          words: palabras,
+          segments: segmentos,
         });
       } catch (error) {
         next(error);

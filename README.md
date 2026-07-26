@@ -33,9 +33,29 @@ Respuesta:
 {
   "transcription": "Texto reconocido en el audio.",
   "model": "whisper-large-v3",
-  "language": "es"
+  "language": "es",
+  "duration": 3.4,
+  "words": [
+    { "word": "Texto", "start": 0.2, "end": 0.7 }
+  ],
+  "segments": [
+    {
+      "id": 0,
+      "text": "Texto reconocido en el audio.",
+      "start": 0.2,
+      "end": 3.1,
+      "avgLogprob": -0.24,
+      "compressionRatio": 1.18,
+      "noSpeechProb": 0.04
+    }
+  ]
 }
 ```
+
+El backend solicita `verbose_json` y marcas por palabra y segmento. Estas
+marcas permiten observar pausas, duración y ritmo aunque Whisper normalice la
+frase al escribirla. La confianza de reconocimiento no es una calificación de
+pronunciación.
 
 ## Desarrollo local
 
