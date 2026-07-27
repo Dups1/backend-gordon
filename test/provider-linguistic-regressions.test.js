@@ -7,6 +7,7 @@ import {
 } from '../src/evaluation/linguistic.js';
 import {
   createContinuousPronunciationConfig,
+  evaluateAzureV2,
 } from '../src/evaluation/providers.js';
 
 function structuredClient(responses) {
@@ -94,6 +95,142 @@ test('configura prosodia de Azure como propiedad booleana', async () => {
   assert.equal(
     JSON.parse(otherLocale.toJSON()).enableProsodyAssessment,
     false,
+  );
+
+  const reading = createContinuousPronunciationConfig(
+    sdk,
+    'en-US',
+    'Read this canonical text.',
+  );
+  assert.equal(
+    JSON.parse(reading.toJSON()).referenceText,
+    'Read this canonical text.',
+  );
+});
+
+test('usa una sola toma para audios de hasta 30 segundos', async () => {
+  let restOptions;
+  let continuousCalls = 0;
+  const result = await evaluateAzureV2({
+    normalizedPath: '/tmp/short.wav',
+    durationSeconds: 30,
+    rubric: {
+      spec: {
+        mode: 'spontaneous',
+        targetLocale: 'en-US',
+        referenceText: '',
+      },
+    },
+    whisper: { words: [] },
+    quality: {},
+    azureConfig: {
+      clavePrimaria: 'primary',
+      region: 'test-region',
+    },
+    evaluateRest: async (options) => {
+      restOptions = options;
+      return {
+        provider: 'azure-speech',
+        pronunciationScore: 82.5,
+        accuracyScore: 84.25,
+        fluencyScore: 79.75,
+        completenessScore: 99,
+        prosodyScore: 78.5,
+        words: [],
+      };
+    },
+    evaluateContinuous: async () => {
+      continuousCalls++;
+      return [];
+    },
+  });
+
+  assert.equal(continuousCalls, 0);
+  assert.equal(restOptions.rutaWav, '/tmp/short.wav');
+  assert.equal(restOptions.textoReferencia, '');
+  assert.equal(restOptions.mode, 'spontaneous');
+  assert.equal(result.recognitionMode, 'single-shot');
+  assert.equal(result.recognitionThresholdSeconds, 30);
+  assert.equal(result.completenessScore, null);
+});
+
+test('rota a modo continuo después de 30 segundos y reconstruye omisiones e inserciones de lectura', async () => {
+  let restCalls = 0;
+  let continuousOptions;
+  const referenceText = 'alpha beta gamma delta epsilon';
+  const spokenWords = ['alpha', 'gamma', 'zeta', 'delta', 'epsilon', 'extra'];
+  const result = await evaluateAzureV2({
+    normalizedPath: '/tmp/long.wav',
+    durationSeconds: 30.1,
+    rubric: {
+      spec: {
+        mode: 'reading',
+        targetLocale: 'en-US',
+        referenceText,
+      },
+    },
+    whisper: { words: [] },
+    quality: {},
+    azureConfig: {
+      clavePrimaria: 'primary',
+      region: 'test-region',
+    },
+    evaluateRest: async () => {
+      restCalls++;
+      throw new Error('REST no debe usarse para audio largo.');
+    },
+    evaluateContinuous: async (options) => {
+      continuousOptions = options;
+      return [
+        {
+          RecognitionStatus: 'Success',
+          Offset: 0,
+          Duration: 301000000,
+          DisplayText: spokenWords.join(' '),
+          NBest: [
+            {
+              Lexical: spokenWords.join(' '),
+              Display: spokenWords.join(' '),
+              PronunciationAssessment: {
+                PronScore: 81,
+                AccuracyScore: 82,
+                FluencyScore: 78,
+                CompletenessScore: 100,
+                ProsodyScore: 76,
+              },
+              Words: spokenWords.map((word, index) => ({
+                Word: word,
+                Offset: index * 40000000,
+                Duration: 30000000,
+                PronunciationAssessment: {
+                  AccuracyScore: 82,
+                  ErrorType: 'None',
+                },
+              })),
+            },
+          ],
+        },
+      ];
+    },
+  });
+
+  assert.equal(restCalls, 0);
+  assert.equal(continuousOptions.referenceText, referenceText);
+  assert.equal(continuousOptions.locale, 'en-US');
+  assert.equal(result.recognitionMode, 'continuous');
+  assert.equal(result.aggregation.reconstructedMiscues, true);
+  assert.equal(result.aggregation.omissionCount, 1);
+  assert.equal(result.aggregation.insertionCount, 2);
+  assert.equal(result.completenessScore, 80);
+  assert.equal(
+    result.words.find((word) => word.errorType === 'Omission')?.word,
+    'beta',
+  );
+  assert.deepEqual(
+    result.words
+      .filter((word) => word.errorType === 'Insertion')
+      .map((word) => word.word),
+    ['zeta', 'extra'],
   );
 });
 

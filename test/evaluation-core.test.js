@@ -456,7 +456,7 @@ test('si Whisper falla conserva Azure y se abstiene en lingüística', async () 
   const audioPath = path.join(directory, 'voice.wav');
   await writeFile(
     audioPath,
-    wavPcm16({ durationSeconds: 12, amplitude: 0.25 }),
+    wavPcm16({ durationSeconds: 32, amplitude: 0.25 }),
   );
   try {
     const quality = await analyzeAudioQuality(audioPath);
@@ -494,7 +494,7 @@ test('si Whisper falla conserva Azure y se abstiene en lingüística', async () 
         {
           RecognitionStatus: 'Success',
           Offset: 0,
-          Duration: 120000000,
+          Duration: 320000000,
           DisplayText: 'I learned from practice.',
           NBest: [
             {

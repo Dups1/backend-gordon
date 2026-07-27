@@ -1,10 +1,8 @@
 import { createReadStream } from 'node:fs';
 import { readFile } from 'node:fs/promises';
+import { finished } from 'node:stream/promises';
 
-import {
-  cleanAudioChunks,
-  splitNormalizedAudio,
-} from './audio.js';
+import { cleanAudioChunks, splitNormalizedAudio } from './audio.js';
 import {
   EvaluationError,
   finiteScore,
@@ -12,6 +10,8 @@ import {
   tokenErrorRate,
 } from './domain.js';
 import { withCircuitBreaker } from './resilience.js';
+
+export const AZURE_CONTINUOUS_THRESHOLD_SECONDS = 30;
 
 function finite(value) {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
@@ -290,8 +290,9 @@ export async function transcribeWhisper({
       let raw;
       let lastError;
       for (let attempt = 0; attempt < 3; attempt++) {
+        const fileStream = createReadStream(chunk.path);
         const options = {
-          file: createReadStream(chunk.path),
+          file: fileStream,
           model,
           response_format: 'verbose_json',
           timestamp_granularities: ['word', 'segment'],
@@ -313,6 +314,9 @@ export async function transcribeWhisper({
             (Number.isInteger(error?.status) && error.status >= 500);
           if (!retryable || attempt === 2) break;
           await delay(250 * 3 ** attempt + Math.floor(Math.random() * 150));
+        } finally {
+          if (!fileStream.destroyed) fileStream.destroy();
+          await finished(fileStream).catch(() => {});
         }
       }
       if (!raw) {
@@ -362,9 +366,13 @@ export async function transcribeWhisper({
   }
 }
 
-function alignReference(referenceText, recognizedWords) {
+function alignReadingWords(referenceText, recognizedWords) {
   const reference = normalizeTokens(referenceText);
-  const recognized = recognizedWords.map((word) => normalizeTokens(word.word)[0] ?? '');
+  const recognized = recognizedWords.map(
+    (word) => normalizeTokens(word.word)[0] ?? '',
+  );
+  const substitutionCost = (referenceWord, recognizedWord) =>
+    referenceWord === recognizedWord ? 0 : 2;
   const rows = Array.from({ length: reference.length + 1 }, () =>
     Array(recognized.length + 1).fill(0),
   );
@@ -375,11 +383,12 @@ function alignReference(referenceText, recognizedWords) {
       rows[i][j] = Math.min(
         rows[i - 1][j] + 1,
         rows[i][j - 1] + 1,
-        rows[i - 1][j - 1] + (reference[i - 1] === recognized[j - 1] ? 0 : 1),
+        rows[i - 1][j - 1] +
+          substitutionCost(reference[i - 1], recognized[j - 1]),
       );
     }
   }
-  const mapping = new Map();
+  const aligned = [];
   let i = reference.length;
   let j = recognized.length;
   while (i > 0 || j > 0) {
@@ -387,54 +396,47 @@ function alignReference(referenceText, recognizedWords) {
       i > 0 &&
       j > 0 &&
       rows[i][j] ===
-        rows[i - 1][j - 1] + (reference[i - 1] === recognized[j - 1] ? 0 : 1)
+        rows[i - 1][j - 1] +
+          substitutionCost(reference[i - 1], recognized[j - 1])
     ) {
-      mapping.set(j - 1, i - 1);
+      const word = recognizedWords[j - 1];
+      const matches = reference[i - 1] === recognized[j - 1];
+      aligned.push(
+        matches
+          ? word
+          : {
+              ...word,
+              expectedWord: reference[i - 1],
+              azureErrorType: word.errorType,
+              errorType: 'Substitution',
+            },
+      );
       i--;
       j--;
     } else if (i > 0 && rows[i][j] === rows[i - 1][j] + 1) {
+      aligned.push({
+        word: reference[i - 1],
+        expectedWord: reference[i - 1],
+        start: null,
+        duration: null,
+        accuracyScore: null,
+        errorType: 'Omission',
+        feedback: null,
+        syllables: [],
+        phonemes: [],
+      });
       i--;
     } else {
+      const word = recognizedWords[j - 1];
+      aligned.push({
+        ...word,
+        azureErrorType: word.errorType,
+        errorType: 'Insertion',
+      });
       j--;
     }
   }
-  return { reference, mapping };
-}
-
-function referenceSlices(referenceText, whisperWords, chunks, durationSeconds) {
-  const { reference, mapping } = alignReference(referenceText, whisperWords);
-  let previousEnd = 0;
-  return chunks.map((chunk, chunkIndex) => {
-    const recognizedIndexes = whisperWords
-      .map((word, index) => ({ word, index }))
-      .filter(({ word }) => {
-        const center = (word.start + word.end) / 2;
-        return center >= chunk.start && center < chunk.end;
-      })
-      .map(({ index }) => index);
-    const mapped = recognizedIndexes
-      .map((index) => mapping.get(index))
-      .filter(Number.isInteger);
-    const proportionalStart = Math.floor(
-      (chunk.start / durationSeconds) * reference.length,
-    );
-    const proportionalEnd = Math.ceil(
-      (chunk.end / durationSeconds) * reference.length,
-    );
-    const start = Math.max(
-      previousEnd,
-      mapped.length ? Math.min(...mapped) : proportionalStart,
-    );
-    const end =
-      chunkIndex === chunks.length - 1
-        ? reference.length
-        : Math.max(
-            start + 1,
-            mapped.length ? Math.max(...mapped) + 1 : proportionalEnd,
-          );
-    previousEnd = Math.min(reference.length, end);
-    return reference.slice(start, previousEnd).join(' ');
-  });
+  return aligned.reverse();
 }
 
 function weightedAverage(items, valueSelector, weightSelector) {
@@ -449,13 +451,20 @@ function weightedAverage(items, valueSelector, weightSelector) {
   return valid.reduce((sum, item) => sum + item.value * item.weight, 0) / weight;
 }
 
-function aggregateAzureChunks(chunks, { mode, locale, referenceText }) {
-  const words = chunks.flatMap((chunk) =>
+function aggregateAzureChunks(
+  chunks,
+  { mode, locale, referenceText, reconstructReadingMiscues = false },
+) {
+  const recognizedWords = chunks.flatMap((chunk) =>
     chunk.result.words.map((word) => ({
       ...word,
       start: word.start === null ? null : word.start + chunk.start,
     })),
   );
+  const words =
+    mode === 'reading' && reconstructReadingMiscues
+      ? alignReadingWords(referenceText, recognizedWords)
+      : recognizedWords;
   const phonemes = words.flatMap((word) => word.phonemes);
   const eligibleDuration = chunks.reduce(
     (sum, chunk) => sum + (chunk.end - chunk.start),
@@ -483,9 +492,13 @@ function aggregateAzureChunks(chunks, { mode, locale, referenceText }) {
     (chunk) => chunk.end - chunk.start,
   );
   const referenceWords = normalizeTokens(referenceText).length;
-  const pronouncedWords = words.filter(
-    (word) => !['Omission'].includes(word.errorType),
+  const omittedWords = words.filter(
+    (word) => word.errorType === 'Omission',
   ).length;
+  const pronouncedWords =
+    mode === 'reading'
+      ? Math.max(0, referenceWords - omittedWords)
+      : words.length;
   const completenessScore =
     mode === 'reading' && referenceWords
       ? Math.min(100, (pronouncedWords / referenceWords) * 100)
@@ -520,13 +533,26 @@ function aggregateAzureChunks(chunks, { mode, locale, referenceText }) {
       eligibleDuration,
       referenceWordCount: referenceWords,
       pronouncedWordCount: pronouncedWords,
+      omissionCount: omittedWords,
+      insertionCount: words.filter(
+        (word) => word.errorType === 'Insertion',
+      ).length,
+      substitutionCount: words.filter(
+        (word) => word.errorType === 'Substitution',
+      ).length,
+      reconstructedMiscues:
+        mode === 'reading' && reconstructReadingMiscues,
     },
   };
 }
 
-export function createContinuousPronunciationConfig(sdk, locale) {
+export function createContinuousPronunciationConfig(
+  sdk,
+  locale,
+  referenceText = '',
+) {
   const pronunciation = new sdk.PronunciationAssessmentConfig(
-    '',
+    referenceText,
     sdk.PronunciationAssessmentGradingSystem.HundredMark,
     sdk.PronunciationAssessmentGranularity.Phoneme,
     false,
@@ -542,6 +568,7 @@ async function recognizeContinuousWithKey({
   region,
   normalizedPath,
   locale,
+  referenceText = '',
   timeoutMs = 7 * 60 * 1000,
 }) {
   let module;
@@ -562,7 +589,11 @@ async function recognizeContinuousWithKey({
     await readFile(normalizedPath),
   );
   const recognizer = new sdk.SpeechRecognizer(speechConfig, audioConfig);
-  const pronunciation = createContinuousPronunciationConfig(sdk, locale);
+  const pronunciation = createContinuousPronunciationConfig(
+    sdk,
+    locale,
+    referenceText,
+  );
   pronunciation.applyTo(recognizer);
   return new Promise((resolve, reject) => {
     const rawResults = [];
@@ -607,14 +638,20 @@ async function recognizeContinuousWithKey({
       }
     };
     recognizer.canceled = (_sender, event) => {
+      const authenticationError =
+        event.errorCode === sdk.CancellationErrorCode?.AuthenticationFailure;
       finish(
         new EvaluationError(
           502,
           'Azure canceló la evaluación continua.',
-          event.errorCode === 1
+          authenticationError
             ? 'AZURE_AUTHENTICATION'
             : 'AZURE_CONTINUOUS_ERROR',
-          { cancellationReason: event.reason },
+          {
+            cancellationReason: event.reason,
+            errorCode: event.errorCode,
+            errorDetails: event.errorDetails,
+          },
         ),
       );
     };
@@ -651,7 +688,9 @@ export async function evaluateAzureV2({
       'AZURE_NOT_CONFIGURED',
     );
   }
-  if (rubric.spec.mode === 'spontaneous') {
+  const useContinuous =
+    durationSeconds > AZURE_CONTINUOUS_THRESHOLD_SECONDS;
+  if (useContinuous) {
     const keys = [azureConfig.clavePrimaria, azureConfig.claveSecundaria].filter(
       (value, index, values) => value && values.indexOf(value) === index,
     );
@@ -664,8 +703,19 @@ export async function evaluateAzureV2({
             region: azureConfig.region,
             normalizedPath,
             locale: rubric.spec.targetLocale,
+            referenceText:
+              rubric.spec.mode === 'reading'
+                ? rubric.spec.referenceText
+                : '',
           }),
         );
+        if (!Array.isArray(rawResults) || rawResults.length === 0) {
+          throw new EvaluationError(
+            502,
+            'Azure no devolvió segmentos en la evaluación continua.',
+            'AZURE_NO_ASSESSMENT',
+          );
+        }
         const chunks = rawResults.map((raw, index) => ({
           start: azureSeconds(raw.Offset) ?? 0,
           end:
@@ -673,16 +723,25 @@ export async function evaluateAzureV2({
             (azureSeconds(raw.Duration) ?? durationSeconds / rawResults.length),
           referenceText: '',
           result: normalizeAzureResponse(raw, {
-            mode: 'spontaneous',
+            mode: rubric.spec.mode,
             locale: rubric.spec.targetLocale,
             requestId: `continuous-${index}`,
           }),
         }));
-        return aggregateAzureChunks(chunks, {
-          mode: 'spontaneous',
-          locale: rubric.spec.targetLocale,
-          referenceText: '',
-        });
+        return {
+          ...aggregateAzureChunks(chunks, {
+            mode: rubric.spec.mode,
+            locale: rubric.spec.targetLocale,
+            referenceText:
+              rubric.spec.mode === 'reading'
+                ? rubric.spec.referenceText
+                : '',
+            reconstructReadingMiscues: rubric.spec.mode === 'reading',
+          }),
+          recognitionMode: 'continuous',
+          recognitionThresholdSeconds:
+            AZURE_CONTINUOUS_THRESHOLD_SECONDS,
+        };
       } catch (error) {
         lastError = error;
         if (error?.code !== 'AZURE_AUTHENTICATION') break;
@@ -690,62 +749,26 @@ export async function evaluateAzureV2({
     }
     throw lastError;
   }
-  const chunks = await splitNormalizedAudio(normalizedPath, {
-    durationSeconds,
-    chunkSeconds: 25,
-    overlapSeconds: 0,
-    preferredSilences: quality?.activity?.silenceIntervals ?? [],
-  });
-  try {
-    const references =
-      rubric.spec.mode === 'reading'
-        ? referenceSlices(
-            rubric.spec.referenceText,
-            whisper.words,
-            chunks,
-            durationSeconds,
-          )
-        : chunks.map(() => '');
-    const results = [];
-    for (let index = 0; index < chunks.length; index++) {
-      const rawNormalized = await withCircuitBreaker('azure-speech', () =>
-        evaluateRest({
-          rutaWav: chunks[index].path,
-          textoReferencia: references[index],
-          idioma: rubric.spec.targetLocale,
-          configuracion: azureConfig,
-          mode: rubric.spec.mode,
-          preserveRaw: true,
-        }),
-      );
-      const normalized =
-        rawNormalized?.rawResponse || rawNormalized?.recognitionStatus
-          ? rawNormalized
-          : rawNormalized;
-      results.push({
-        ...chunks[index],
-        referenceText: references[index],
-        result: normalized,
-      });
-    }
-    return results.length === 1
-      ? {
-          ...results[0].result,
-          mode: rubric.spec.mode,
-          locale: rubric.spec.targetLocale,
-          completenessScore:
-            rubric.spec.mode === 'reading'
-              ? results[0].result.completenessScore
-              : null,
-        }
-      : aggregateAzureChunks(results, {
-          mode: rubric.spec.mode,
-          locale: rubric.spec.targetLocale,
-          referenceText: rubric.spec.referenceText,
-        });
-  } finally {
-    await cleanAudioChunks(chunks);
-  }
+  const result = await withCircuitBreaker('azure-speech', () =>
+    evaluateRest({
+      rutaWav: normalizedPath,
+      textoReferencia:
+        rubric.spec.mode === 'reading' ? rubric.spec.referenceText : '',
+      idioma: rubric.spec.targetLocale,
+      configuracion: azureConfig,
+      mode: rubric.spec.mode,
+      preserveRaw: true,
+    }),
+  );
+  return {
+    ...result,
+    mode: rubric.spec.mode,
+    locale: rubric.spec.targetLocale,
+    completenessScore:
+      rubric.spec.mode === 'reading' ? result.completenessScore : null,
+    recognitionMode: 'single-shot',
+    recognitionThresholdSeconds: AZURE_CONTINUOUS_THRESHOLD_SECONDS,
+  };
 }
 
 export function transcriptComparison(whisper, azure) {

@@ -650,7 +650,10 @@ export async function runAssessment({
                   rubric.spec.mode === 'reading' ? 'canonical' : 'none',
                 granularity: 'phoneme',
                 prosody: rubric.spec.targetLocale === 'en-US',
-                continuous: rubric.spec.mode === 'spontaneous',
+                recognitionMode: azure.recognitionMode,
+                continuous: azure.recognitionMode === 'continuous',
+                continuousThresholdSeconds:
+                  azure.recognitionThresholdSeconds,
               },
             }
           : { provider: 'azure-speech', error: azureError },
