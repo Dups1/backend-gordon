@@ -1891,6 +1891,12 @@ export function createApp({
               report.providerEvidence?.linguistic?.evidence
                 ?.missingDimensions ?? null,
             azure: report.provenance?.providers?.azure ?? null,
+            providerErrors: {
+              azure:
+                report.providerEvidence?.azure?.error ?? null,
+              linguistic:
+                report.providerEvidence?.linguistic?.error ?? null,
+            },
             dimensions: Object.fromEntries(
               Object.entries(report.dimensions ?? {}).map(
                 ([id, dimension]) => [

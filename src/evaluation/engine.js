@@ -450,6 +450,7 @@ export async function runAssessment({
       message:
         error?.message ??
         'Azure Speech no pudo completar la evaluación acústica.',
+      details: error?.details ?? null,
     };
   }
   const comparedTranscript = transcriptComparison(whisperEvidence, azure);
@@ -529,6 +530,7 @@ export async function runAssessment({
         message:
           error?.message ??
           'El análisis lingüístico no pudo completarse con doble evaluación.',
+        details: error?.details ?? null,
       };
     }
   }

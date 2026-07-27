@@ -12,10 +12,12 @@ import {
 
 function structuredClient(responses) {
   const pending = [...responses];
+  const calls = [];
   return {
     chat: {
       completions: {
-        async create() {
+        async create(options) {
+          calls.push(options);
           const content = pending.shift();
           assert.ok(content, 'La prueba no configuró una respuesta del modelo.');
           return {
@@ -26,6 +28,9 @@ function structuredClient(responses) {
     },
     get pendingResponses() {
       return pending.length;
+    },
+    get calls() {
+      return calls;
     },
   };
 }
@@ -234,6 +239,94 @@ test('rota a modo continuo después de 30 segundos y reconstruye omisiones e ins
   );
 });
 
+test('si Azure continuo falla segmenta una respuesta espontánea en tomas menores de 30 segundos', async () => {
+  const restPaths = [];
+  let cleaned = false;
+  let splitOptions;
+  const result = await evaluateAzureV2({
+    normalizedPath: '/tmp/long-spontaneous.wav',
+    durationSeconds: 65,
+    rubric: {
+      spec: {
+        mode: 'spontaneous',
+        targetLocale: 'en-US',
+        referenceText: '',
+      },
+    },
+    whisper: { words: [] },
+    quality: {
+      activity: {
+        silenceIntervals: [{ start: 24.5, end: 25 }],
+      },
+    },
+    azureConfig: {
+      clavePrimaria: 'primary',
+      region: 'test-region',
+    },
+    evaluateContinuous: async () => {
+      const error = new Error('Azure canceló la sesión.');
+      error.code = 'AZURE_CONTINUOUS_ERROR';
+      throw error;
+    },
+    splitAudio: async (_path, options) => {
+      splitOptions = options;
+      return [
+        { path: '/tmp/chunk-1.wav', start: 0, end: 25, owned: true },
+        { path: '/tmp/chunk-2.wav', start: 25, end: 50, owned: true },
+        { path: '/tmp/chunk-3.wav', start: 50, end: 65, owned: true },
+      ];
+    },
+    cleanChunks: async () => {
+      cleaned = true;
+    },
+    evaluateRest: async ({ rutaWav }) => {
+      restPaths.push(rutaWav);
+      const index = restPaths.length;
+      return {
+        provider: 'azure-speech',
+        recognitionStatus: 'Success',
+        displayText: `chunk ${index}`,
+        lexicalText: `chunk ${index}`,
+        pronunciationScore: 80,
+        accuracyScore: 80,
+        fluencyScore: 75,
+        completenessScore: null,
+        prosodyScore: 70,
+        words: [
+          {
+            word: `word-${index}`,
+            start: 1,
+            duration: 0.5,
+            accuracyScore: 80,
+            errorType: 'None',
+            phonemes: [],
+            syllables: [],
+          },
+        ],
+        rawResponse: { index },
+      };
+    },
+  });
+
+  assert.deepEqual(restPaths, [
+    '/tmp/chunk-1.wav',
+    '/tmp/chunk-2.wav',
+    '/tmp/chunk-3.wav',
+  ]);
+  assert.equal(splitOptions.chunkSeconds, 25);
+  assert.equal(splitOptions.overlapSeconds, 0);
+  assert.equal(cleaned, true);
+  assert.equal(result.recognitionMode, 'segmented-single-shot-fallback');
+  assert.equal(result.fallback.reasonCode, 'AZURE_CONTINUOUS_ERROR');
+  assert.equal(result.fallback.chunkCount, 3);
+  assert.deepEqual(
+    result.words.map((word) => word.start),
+    [1, 26, 51],
+  );
+  assert.equal(result.accuracyScore, 80);
+  assert.equal(result.fluencyScore, 75);
+});
+
 test('una muestra de 24.8 s con voz y palabras suficientes llega al extractor', async () => {
   const client = structuredClient([
     {
@@ -301,6 +394,7 @@ test('una muestra de 24.8 s con voz y palabras suficientes llega al extractor', 
   assert.ok(evidence.sufficiency.lexicalCount >= 30);
   assert.ok(evidence.sufficiency.voicedSeconds >= 15);
   assert.equal(client.pendingResponses, 0);
+  assert.equal(client.calls[0].max_completion_tokens, 5000);
 });
 
 test('una muestra espontánea pasa con 15 s de voz aunque tenga menos de 30 palabras', async () => {

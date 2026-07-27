@@ -546,6 +546,64 @@ function aggregateAzureChunks(
   };
 }
 
+async function evaluateSegmentedSpontaneous({
+  normalizedPath,
+  durationSeconds,
+  rubric,
+  quality,
+  azureConfig,
+  evaluateRest,
+  continuousError,
+  splitAudio,
+  cleanChunks,
+}) {
+  const audioChunks = await splitAudio(normalizedPath, {
+    durationSeconds,
+    chunkSeconds: 25,
+    overlapSeconds: 0,
+    preferredSilences: quality?.activity?.silenceIntervals ?? [],
+  });
+  try {
+    const chunks = [];
+    for (const chunk of audioChunks) {
+      const result = await withCircuitBreaker('azure-speech', () =>
+        evaluateRest({
+          rutaWav: chunk.path,
+          textoReferencia: '',
+          idioma: rubric.spec.targetLocale,
+          configuracion: azureConfig,
+          mode: 'spontaneous',
+          preserveRaw: true,
+        }),
+      );
+      chunks.push({
+        start: chunk.start,
+        end: chunk.end,
+        referenceText: '',
+        result,
+      });
+    }
+    return {
+      ...aggregateAzureChunks(chunks, {
+        mode: 'spontaneous',
+        locale: rubric.spec.targetLocale,
+        referenceText: '',
+      }),
+      recognitionMode: 'segmented-single-shot-fallback',
+      recognitionThresholdSeconds: AZURE_CONTINUOUS_THRESHOLD_SECONDS,
+      fallback: {
+        from: 'continuous',
+        reasonCode:
+          continuousError?.code ?? 'AZURE_CONTINUOUS_ERROR',
+        chunkSeconds: 25,
+        chunkCount: chunks.length,
+      },
+    };
+  } finally {
+    await cleanChunks(audioChunks);
+  }
+}
+
 export function createContinuousPronunciationConfig(
   sdk,
   locale,
@@ -680,6 +738,8 @@ export async function evaluateAzureV2({
   azureConfig,
   evaluateRest,
   evaluateContinuous = recognizeContinuousWithKey,
+  splitAudio = splitNormalizedAudio,
+  cleanChunks = cleanAudioChunks,
 }) {
   if (!azureConfig) {
     throw new EvaluationError(
@@ -746,6 +806,22 @@ export async function evaluateAzureV2({
         lastError = error;
         if (error?.code !== 'AZURE_AUTHENTICATION') break;
       }
+    }
+    const canFallbackToSegments =
+      rubric.spec.mode === 'spontaneous' &&
+      lastError?.code !== 'AZURE_AUTHENTICATION';
+    if (canFallbackToSegments) {
+      return evaluateSegmentedSpontaneous({
+        normalizedPath,
+        durationSeconds,
+        rubric,
+        quality,
+        azureConfig,
+        evaluateRest,
+        continuousError: lastError,
+        splitAudio,
+        cleanChunks,
+      });
     }
     throw lastError;
   }

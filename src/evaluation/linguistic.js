@@ -216,6 +216,18 @@ function parseStructured(response, name) {
   }
 }
 
+function retryableProviderError(error) {
+  if (error?.status === 408 || error?.status === 429) return true;
+  if (Number.isInteger(error?.status) && error.status >= 500) return true;
+  return [
+    'APIConnectionError',
+    'APIConnectionTimeoutError',
+    'ECONNRESET',
+    'ETIMEDOUT',
+    'UND_ERR_CONNECT_TIMEOUT',
+  ].includes(error?.code ?? error?.name);
+}
+
 async function callStructured({
   client,
   model,
@@ -258,9 +270,7 @@ async function callStructured({
       break;
     } catch (error) {
       lastError = error;
-      const retryable =
-        error?.status === 429 ||
-        (Number.isInteger(error?.status) && error.status >= 500);
+      const retryable = retryableProviderError(error);
       if (!retryable || attempt === 2) break;
       await new Promise((resolve) =>
         setTimeout(
@@ -279,6 +289,15 @@ async function callStructured({
       lastError?.status === 429
         ? 'LINGUISTIC_RATE_LIMIT'
         : 'LINGUISTIC_PROVIDER_ERROR',
+      {
+        providerStatus: Number.isInteger(lastError?.status)
+          ? lastError.status
+          : null,
+        providerCode:
+          typeof lastError?.code === 'string' ? lastError.code : null,
+        providerType:
+          typeof lastError?.name === 'string' ? lastError.name : null,
+      },
     );
   }
   return parseStructured(response, schemaName);
@@ -563,6 +582,7 @@ export async function extractLinguisticEvidence({
     model,
     schema: evidenceSchema,
     schemaName: 'gordon_linguistic_evidence',
+    maxTokens: 5000,
     system: INTERNAL_PROMPTS.evidenceExtractor,
     payload: {
       rubric,
@@ -587,6 +607,7 @@ export async function extractLinguisticEvidence({
       model,
       schema: evidenceSchema,
       schemaName: 'gordon_linguistic_evidence_repair',
+      maxTokens: 5000,
       system: INTERNAL_PROMPTS.evidenceExtractor,
       payload: {
         rubric,

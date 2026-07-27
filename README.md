@@ -116,9 +116,13 @@ La respuesta v2 incluye:
 - recomendación que no puede alterar puntuaciones;
 - versiones de proveedores, prompts, perfil y calibración.
 
-Si Azure falla, Pronunciation y Fluency quedan `unavailable`: no existe un
-fallback heurístico. Si falta cualquier dimensión no se redistribuyen pesos y
-el score global queda `null`.
+En respuestas espontáneas mayores de 30 segundos se intenta Azure continuo. Si
+esa sesión se cancela, el backend divide el WAV normalizado en tomas naturales
+de hasta 25 segundos y vuelve a evaluarlas con Azure single-shot antes de
+agregar fonemas, palabras, fluidez y prosodia por duración elegible. Esto sigue
+siendo evidencia de Azure, no un fallback heurístico. Si también falla la ruta
+segmentada, Pronunciation y Fluency quedan `unavailable`. Si falta cualquier
+dimensión no se redistribuyen pesos y el score global queda `null`.
 
 ### Revisión humana
 
