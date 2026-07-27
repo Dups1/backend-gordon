@@ -518,7 +518,7 @@ export async function extractLinguisticEvidence({
       promptVersion: PROMPT_VERSION,
     };
   }
-  const raw = await callStructured({
+  let raw = await callStructured({
     client,
     model,
     schema: evidenceSchema,
@@ -533,16 +533,54 @@ export async function extractLinguisticEvidence({
       providerDisagreement,
     },
   });
-  const findings = validateFindings(raw.findings, tokens);
+  let findings = validateFindings(raw.findings, tokens);
+  let extractorRepaired = false;
+  if (raw.sufficientEvidence !== true) {
+    const repaired = await callStructured({
+      client,
+      model,
+      schema: evidenceSchema,
+      schemaName: 'gordon_linguistic_evidence_repair',
+      system: INTERNAL_PROMPTS.evidenceExtractor,
+      payload: {
+        rubric,
+        transcript,
+        secondaryTranscript,
+        tokens,
+        quality,
+        providerDisagreement,
+        repair: {
+          reason:
+            'La muestra superó los mínimos deterministas. Revisa cada dimensión por separado y no confundas baja cobertura de la tarea con ausencia de gramática o vocabulario.',
+          previousResult: {
+            sufficientEvidence: raw.sufficientEvidence,
+            taskCoverage: raw.taskCoverage,
+            summary: raw.summary,
+            findings: raw.findings,
+          },
+        },
+      },
+    });
+    const repairedFindings = validateFindings(repaired.findings, tokens);
+    if (
+      repaired.sufficientEvidence === true ||
+      repairedFindings.length > findings.length
+    ) {
+      raw = repaired;
+      findings = repairedFindings;
+      extractorRepaired = true;
+    }
+  }
   return {
-    sufficientEvidence:
-      sufficiency.sufficient && raw.sufficientEvidence === true,
+    sufficientEvidence: sufficiency.sufficient,
     taskCoverage:
       typeof raw.taskCoverage === 'number' ? raw.taskCoverage : null,
     summary: typeof raw.summary === 'string' ? raw.summary.trim() : '',
     findings,
     tokens,
     sufficiency,
+    extractorDeclaredSufficient: raw.sufficientEvidence === true,
+    extractorRepaired,
     promptVersion: PROMPT_VERSION,
   };
 }

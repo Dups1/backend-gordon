@@ -269,6 +269,90 @@ test('una muestra de 24.8 s con voz y palabras suficientes llega al extractor', 
   assert.equal(client.pendingResponses, 0);
 });
 
+test('una respuesta fuera del tema no apaga gramática ni vocabulario', async () => {
+  const client = structuredClient([
+    {
+      sufficientEvidence: false,
+      taskCoverage: 0.2,
+      summary: 'La respuesta habla de otro país.',
+      findings: [],
+    },
+    {
+      sufficientEvidence: true,
+      taskCoverage: 0.2,
+      summary:
+        'La cobertura comunicativa es baja, pero existe evidencia lingüística.',
+      findings: [
+        {
+          id: 'communication-topic',
+          dimension: 'communication',
+          type: 'coverage',
+          claim: 'La respuesta desarrolla una ruta por un país distinto.',
+          tokenStart: 0,
+          tokenEnd: 1,
+          quote: 'Japan route',
+          correction: '',
+          certainty: 0.98,
+        },
+        {
+          id: 'grammar-present-perfect',
+          dimension: 'grammar',
+          type: 'strength',
+          claim: 'La respuesta contiene una estructura verbal identificable.',
+          tokenStart: 2,
+          tokenEnd: 4,
+          quote: 'uses present perfect',
+          correction: '',
+          certainty: 0.95,
+        },
+        {
+          id: 'vocabulary-travel',
+          dimension: 'vocabulary',
+          type: 'strength',
+          claim: 'La respuesta contiene vocabulario temático de viajes.',
+          tokenStart: 6,
+          tokenEnd: 7,
+          quote: 'travel vocabulary',
+          correction: '',
+          certainty: 0.95,
+        },
+      ],
+    },
+  ]);
+  const transcript =
+    'Japan route uses present perfect and travel vocabulary but discusses another country. ' +
+    'The student also compares trains, buses, ferries, hotels, cities, roads, schedules, prices, comfort, safety, traffic, journeys, stops, plans, choices, routes, maps, and tickets.';
+
+  const evidence = await extractLinguisticEvidence({
+    client,
+    model: 'test-model',
+    rubric: {
+      spec: {
+        mode: 'spontaneous',
+        instruction: 'Describe an itinerary through Italy.',
+      },
+    },
+    transcript,
+    secondaryTranscript: '',
+    quality: {
+      metrics: {
+        durationSeconds: 35,
+        voicedSeconds: 30,
+      },
+    },
+    providerDisagreement: null,
+  });
+
+  assert.equal(evidence.sufficientEvidence, true);
+  assert.equal(evidence.extractorRepaired, true);
+  assert.equal(evidence.taskCoverage, 0.2);
+  assert.deepEqual(
+    [...new Set(evidence.findings.map((finding) => finding.dimension))].sort(),
+    ['communication', 'grammar', 'vocabulary'],
+  );
+  assert.equal(client.pendingResponses, 0);
+});
+
 test('repara citas omitidas o inválidas usando evidencia de la misma dimensión', async () => {
   const client = structuredClient([
     judgeResponse(),
