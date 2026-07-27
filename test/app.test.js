@@ -56,6 +56,7 @@ test('expone el estado del servicio y el modelo configurado', async () => {
     ok: true,
     service: 'backend-gordon',
     model: GROQ_MODEL,
+    promptVersion: 'gordon-evidence-v1.1',
   });
 });
 

@@ -1629,6 +1629,7 @@ export function createApp({
       ok: true,
       service: 'backend-gordon',
       model: GROQ_MODEL,
+      promptVersion: PROMPT_MANIFEST_VERSION,
     });
   });
 
@@ -1647,6 +1648,8 @@ export function createApp({
     response.status(ready ? 200 : 503).json({
       ready,
       service: 'backend-gordon',
+      promptVersion: PROMPT_MANIFEST_VERSION,
+      promptHash: PROMPT_MANIFEST_HASH,
       checks,
       circuits: circuitSnapshot(),
     });
@@ -1857,6 +1860,51 @@ export function createApp({
             cacheIdempotencia.delete(cacheIdempotencia.keys().next().value);
           }
         }
+        logger?.info?.(
+          JSON.stringify({
+            event: 'assessment_completed',
+            requestId,
+            assessmentId: report.assessmentId,
+            status: report.status,
+            mode: report.taskSnapshot?.mode ?? rubric.spec.mode,
+            promptVersion: report.provenance?.promptVersion,
+            quality: {
+              status: report.quality?.status,
+              durationSeconds:
+                report.quality?.metrics?.durationSeconds,
+              voicedSeconds:
+                report.quality?.metrics?.voicedSeconds,
+              speechRatio: report.quality?.metrics?.speechRatio,
+              reasons: report.quality?.reasons,
+              warnings: report.quality?.warnings,
+            },
+            linguisticSufficiency:
+              report.providerEvidence?.linguistic?.evidence?.sufficiency ??
+              null,
+            extractorRepaired:
+              report.providerEvidence?.linguistic?.evidence
+                ?.extractorRepaired ?? false,
+            extractorRepairAttempted:
+              report.providerEvidence?.linguistic?.evidence
+                ?.extractorRepairAttempted ?? false,
+            missingLinguisticDimensions:
+              report.providerEvidence?.linguistic?.evidence
+                ?.missingDimensions ?? null,
+            azure: report.provenance?.providers?.azure ?? null,
+            dimensions: Object.fromEntries(
+              Object.entries(report.dimensions ?? {}).map(
+                ([id, dimension]) => [
+                  id,
+                  {
+                    status: dimension.status,
+                    score: dimension.score,
+                    reasonCode: dimension.reasonCode,
+                  },
+                ],
+              ),
+            ),
+          }),
+        );
         response.json(report);
       } catch (error) {
         next(error);

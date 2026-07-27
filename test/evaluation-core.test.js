@@ -317,6 +317,7 @@ test('normaliza MP3, Opus, WebM, M4A y FLAC por su firma real', async () => {
 
 test('expone el flujo v2 síncrono con confirmación previa y audio real', async () => {
   const secret = 'rubric-secret-test';
+  const logs = [];
   const storage = {
     configured: false,
     async saveAssessment() {
@@ -331,6 +332,11 @@ test('expone el flujo v2 síncrono con confirmación previa y audio real', async
   };
   const app = createApp({
     groqClient: {},
+    logger: {
+      info(message) {
+        logs.push(JSON.parse(message));
+      },
+    },
     rubricSigningSecret: secret,
     almacenamientoPiloto: storage,
     compilarRubrica: async ({ draft }) => draft,
@@ -358,6 +364,23 @@ test('expone el flujo v2 síncrono con confirmación previa y audio real', async
         mode: rubric.spec.mode,
         targetLocale: rubric.spec.targetLocale,
         cefr: rubric.spec.cefr,
+      },
+      quality: {
+        status: 'accepted',
+        reasons: [],
+        warnings: [],
+        metrics: { durationSeconds: 12, voicedSeconds: 11 },
+      },
+      dimensions: {
+        communication: {
+          status: 'insufficientEvidence',
+          score: null,
+          reasonCode: 'LINGUISTIC_EVIDENCE_MISSING',
+        },
+      },
+      provenance: {
+        promptVersion: 'gordon-evidence-v1.1',
+        providers: { azure: { recognitionMode: 'single-shot' } },
       },
       consentStorage: { requested: false, stored: false },
       providerEvidence: {},
@@ -392,6 +415,15 @@ test('expone el flujo v2 síncrono con confirmación previa y audio real', async
   assert.equal(assessment.body.schemaVersion, '2.0.0');
   assert.equal(assessment.body.status, 'needsReview');
   assert.equal(assessment.body.consentStorage.stored, false);
+  const completionLog = logs.find(
+    (entry) => entry.event === 'assessment_completed',
+  );
+  assert.equal(completionLog.quality.durationSeconds, 12);
+  assert.equal(completionLog.quality.voicedSeconds, 11);
+  assert.equal(
+    completionLog.dimensions.communication.reasonCode,
+    'LINGUISTIC_EVIDENCE_MISSING',
+  );
 });
 
 test('mejora una consigna sin ocultar ni reemplazar el texto original', async () => {

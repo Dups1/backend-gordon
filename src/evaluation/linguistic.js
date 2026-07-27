@@ -476,19 +476,52 @@ function validateFindings(findings, tokens) {
     }));
 }
 
+function mergeValidatedFindings(primary, secondary) {
+  const merged = [];
+  const evidenceKeys = new Set();
+  const usedIds = new Set();
+  for (const finding of [...primary, ...secondary]) {
+    const evidenceKey = [
+      finding.dimension,
+      finding.kind,
+      finding.transcriptStart,
+      finding.transcriptEnd,
+      finding.quote,
+    ].join('|');
+    if (evidenceKeys.has(evidenceKey)) continue;
+    evidenceKeys.add(evidenceKey);
+
+    const baseId = finding.id || `e${merged.length}`;
+    let id = baseId;
+    let suffix = 1;
+    while (usedIds.has(id)) id = `${baseId}-${suffix++}`;
+    usedIds.add(id);
+    merged.push({ ...finding, id });
+  }
+  return merged;
+}
+
 function deterministicSufficiency({ rubric, transcript, quality }) {
   const lexicalCount = normalizeTokens(transcript).filter(
     (token) => token.length > 1,
   ).length;
   const voicedSeconds = quality?.metrics?.voicedSeconds ?? 0;
-  const minimumWords = rubric.spec.mode === 'reading' ? 10 : 30;
-  const minimumVoice = rubric.spec.mode === 'reading' ? 5 : 15;
+  const reading = rubric.spec.mode === 'reading';
+  const minimumWords = reading ? 10 : 30;
+  const minimumVoice = reading ? 5 : 15;
+  const meetsWords = lexicalCount >= minimumWords;
+  const meetsVoice = voicedSeconds >= minimumVoice;
   return {
-    sufficient: lexicalCount >= minimumWords && voicedSeconds >= minimumVoice,
+    sufficient: reading
+      ? meetsWords && meetsVoice
+      : meetsWords || meetsVoice,
     lexicalCount,
     voicedSeconds,
     minimumWords,
     minimumVoice,
+    requirementsOperator: reading ? 'and' : 'or',
+    meetsWords,
+    meetsVoice,
   };
 }
 
@@ -508,10 +541,17 @@ export async function extractLinguisticEvidence({
     quality,
   });
   if (!sufficiency.sufficient) {
+    const measuredVoice = sufficiency.voicedSeconds.toFixed(1);
+    const requirement =
+      sufficiency.requirementsOperator === 'and' ? 'y' : 'o';
     return {
       sufficientEvidence: false,
       taskCoverage: null,
-      summary: 'La muestra no alcanza el mínimo determinista de evidencia.',
+      summary:
+        `Se detectaron ${sufficiency.lexicalCount} palabras léxicas y ` +
+        `${measuredVoice} segundos de voz efectiva. Se requieren ` +
+        `${sufficiency.minimumWords} palabras ${requirement} ` +
+        `${sufficiency.minimumVoice} segundos de voz efectiva.`,
       findings: [],
       tokens,
       sufficiency,
@@ -535,7 +575,13 @@ export async function extractLinguisticEvidence({
   });
   let findings = validateFindings(raw.findings, tokens);
   let extractorRepaired = false;
-  if (raw.sufficientEvidence !== true) {
+  let extractorRepairAttempted = false;
+  const missingDimensions = LINGUISTIC_DIMENSIONS.filter(
+    (dimension) =>
+      !findings.some((finding) => finding.dimension === dimension),
+  );
+  if (raw.sufficientEvidence !== true || missingDimensions.length > 0) {
+    extractorRepairAttempted = true;
     const repaired = await callStructured({
       client,
       model,
@@ -552,6 +598,7 @@ export async function extractLinguisticEvidence({
         repair: {
           reason:
             'La muestra superó los mínimos deterministas. Revisa cada dimensión por separado y no confundas baja cobertura de la tarea con ausencia de gramática o vocabulario.',
+          missingDimensions,
           previousResult: {
             sufficientEvidence: raw.sufficientEvidence,
             taskCoverage: raw.taskCoverage,
@@ -562,15 +609,23 @@ export async function extractLinguisticEvidence({
       },
     });
     const repairedFindings = validateFindings(repaired.findings, tokens);
+    const mergedFindings = mergeValidatedFindings(
+      findings,
+      repairedFindings,
+    );
     if (
       repaired.sufficientEvidence === true ||
-      repairedFindings.length > findings.length
+      mergedFindings.length > findings.length
     ) {
-      raw = repaired;
-      findings = repairedFindings;
+      raw = { ...raw, ...repaired };
+      findings = mergedFindings;
       extractorRepaired = true;
     }
   }
+  const finalMissingDimensions = LINGUISTIC_DIMENSIONS.filter(
+    (dimension) =>
+      !findings.some((finding) => finding.dimension === dimension),
+  );
   return {
     sufficientEvidence: sufficiency.sufficient,
     taskCoverage:
@@ -580,7 +635,9 @@ export async function extractLinguisticEvidence({
     tokens,
     sufficiency,
     extractorDeclaredSufficient: raw.sufficientEvidence === true,
+    extractorRepairAttempted,
     extractorRepaired,
+    missingDimensions: finalMissingDimensions,
     promptVersion: PROMPT_VERSION,
   };
 }

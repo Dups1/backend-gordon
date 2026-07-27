@@ -240,7 +240,41 @@ test('una muestra de 24.8 s con voz y palabras suficientes llega al extractor', 
       sufficientEvidence: true,
       taskCoverage: 0.9,
       summary: 'La muestra contiene evidencia suficiente.',
-      findings: [],
+      findings: [
+        {
+          id: 'communication-sequence',
+          dimension: 'communication',
+          type: 'coverage',
+          claim: 'La respuesta inicia una narración situada en el pasado.',
+          tokenStart: 0,
+          tokenEnd: 3,
+          quote: 'When I was ten',
+          correction: '',
+          certainty: 0.98,
+        },
+        {
+          id: 'grammar-used-to',
+          dimension: 'grammar',
+          type: 'strength',
+          claim: 'La respuesta utiliza used to.',
+          tokenStart: 4,
+          tokenEnd: 7,
+          quote: 'I used to ride',
+          correction: '',
+          certainty: 0.98,
+        },
+        {
+          id: 'vocabulary-bike',
+          dimension: 'vocabulary',
+          type: 'strength',
+          claim: 'La respuesta emplea vocabulario cotidiano pertinente.',
+          tokenStart: 8,
+          tokenEnd: 11,
+          quote: 'my bike to school',
+          correction: '',
+          certainty: 0.98,
+        },
+      ],
     },
   ]);
   const transcript =
@@ -266,6 +300,76 @@ test('una muestra de 24.8 s con voz y palabras suficientes llega al extractor', 
   assert.equal(evidence.sufficientEvidence, true);
   assert.ok(evidence.sufficiency.lexicalCount >= 30);
   assert.ok(evidence.sufficiency.voicedSeconds >= 15);
+  assert.equal(client.pendingResponses, 0);
+});
+
+test('una muestra espontánea pasa con 15 s de voz aunque tenga menos de 30 palabras', async () => {
+  const client = structuredClient([
+    {
+      sufficientEvidence: true,
+      taskCoverage: 0.9,
+      summary: 'La muestra contiene voz suficiente.',
+      findings: [
+        {
+          id: 'communication-family',
+          dimension: 'communication',
+          type: 'coverage',
+          claim: 'La respuesta relata una visita familiar.',
+          tokenStart: 0,
+          tokenEnd: 3,
+          quote: 'Last weekend I visited',
+          correction: '',
+          certainty: 0.98,
+        },
+        {
+          id: 'grammar-past',
+          dimension: 'grammar',
+          type: 'strength',
+          claim: 'La respuesta utiliza pasado simple.',
+          tokenStart: 4,
+          tokenEnd: 7,
+          quote: 'my grandmother and helped',
+          correction: '',
+          certainty: 0.97,
+        },
+        {
+          id: 'vocabulary-family',
+          dimension: 'vocabulary',
+          type: 'strength',
+          claim: 'La respuesta contiene vocabulario familiar pertinente.',
+          tokenStart: 8,
+          tokenEnd: 11,
+          quote: 'her prepare dinner We',
+          correction: '',
+          certainty: 0.96,
+        },
+      ],
+    },
+  ]);
+  const transcript =
+    'Last weekend I visited my grandmother and helped her prepare dinner. We talked about school, watched a movie, and planned another family visit.';
+
+  const evidence = await extractLinguisticEvidence({
+    client,
+    model: 'test-model',
+    rubric: {
+      spec: { mode: 'spontaneous' },
+    },
+    transcript,
+    secondaryTranscript: '',
+    quality: {
+      metrics: {
+        durationSeconds: 19,
+        voicedSeconds: 16,
+      },
+    },
+    providerDisagreement: null,
+  });
+
+  assert.equal(evidence.sufficientEvidence, true);
+  assert.ok(evidence.sufficiency.lexicalCount < 30);
+  assert.equal(evidence.sufficiency.meetsVoice, true);
+  assert.equal(evidence.sufficiency.requirementsOperator, 'or');
   assert.equal(client.pendingResponses, 0);
 });
 
@@ -346,6 +450,90 @@ test('una respuesta fuera del tema no apaga gramática ni vocabulario', async ()
   assert.equal(evidence.sufficientEvidence, true);
   assert.equal(evidence.extractorRepaired, true);
   assert.equal(evidence.taskCoverage, 0.2);
+  assert.deepEqual(
+    [...new Set(evidence.findings.map((finding) => finding.dimension))].sort(),
+    ['communication', 'grammar', 'vocabulary'],
+  );
+  assert.equal(client.pendingResponses, 0);
+});
+
+test('repara dimensiones omitidas aunque el extractor declare evidencia suficiente', async () => {
+  const client = structuredClient([
+    {
+      sufficientEvidence: true,
+      taskCoverage: 0.8,
+      summary: 'La respuesta contiene evidencia parcial.',
+      findings: [
+        {
+          id: 'communication-trip',
+          dimension: 'communication',
+          type: 'coverage',
+          claim: 'La respuesta desarrolla una experiencia de viaje.',
+          tokenStart: 0,
+          tokenEnd: 3,
+          quote: 'Last year I traveled',
+          correction: '',
+          certainty: 0.96,
+        },
+      ],
+    },
+    {
+      sufficientEvidence: true,
+      taskCoverage: 0.8,
+      summary: 'Hay evidencia verificable para las tres dimensiones.',
+      findings: [
+        {
+          id: 'grammar-past',
+          dimension: 'grammar',
+          type: 'strength',
+          claim: 'La respuesta emplea pasado simple.',
+          tokenStart: 0,
+          tokenEnd: 3,
+          quote: 'Last year I traveled',
+          correction: '',
+          certainty: 0.97,
+        },
+        {
+          id: 'vocabulary-travel',
+          dimension: 'vocabulary',
+          type: 'strength',
+          claim: 'La respuesta emplea vocabulario pertinente de viajes.',
+          tokenStart: 4,
+          tokenEnd: 7,
+          quote: 'by train through several',
+          correction: '',
+          certainty: 0.95,
+        },
+      ],
+    },
+  ]);
+  const transcript =
+    'Last year I traveled by train through several cities and visited museums, markets, stations, hotels, restaurants, parks, bridges, neighborhoods, landmarks, and cultural centers. I compared prices, planned routes, bought tickets, asked for directions, described the weather, and explained which places were comfortable, convenient, safe, crowded, memorable, and interesting.';
+
+  const evidence = await extractLinguisticEvidence({
+    client,
+    model: 'test-model',
+    rubric: {
+      spec: {
+        mode: 'spontaneous',
+        instruction: 'Describe a trip.',
+      },
+    },
+    transcript,
+    secondaryTranscript: '',
+    quality: {
+      metrics: {
+        durationSeconds: 35,
+        voicedSeconds: 30,
+      },
+    },
+    providerDisagreement: null,
+  });
+
+  assert.equal(evidence.sufficientEvidence, true);
+  assert.equal(evidence.extractorRepairAttempted, true);
+  assert.equal(evidence.extractorRepaired, true);
+  assert.deepEqual(evidence.missingDimensions, []);
   assert.deepEqual(
     [...new Set(evidence.findings.map((finding) => finding.dimension))].sort(),
     ['communication', 'grammar', 'vocabulary'],
