@@ -394,7 +394,84 @@ test('una muestra de 24.8 s con voz y palabras suficientes llega al extractor', 
   assert.ok(evidence.sufficiency.lexicalCount >= 30);
   assert.ok(evidence.sufficiency.voicedSeconds >= 15);
   assert.equal(client.pendingResponses, 0);
-  assert.equal(client.calls[0].max_completion_tokens, 5000);
+  assert.equal(client.calls[0].max_completion_tokens, 3200);
+});
+
+test('respeta retry-after de Groq y recupera el extractor tras un 429', async () => {
+  let attempts = 0;
+  const response = {
+    sufficientEvidence: true,
+    taskCoverage: 0.8,
+    summary: 'La muestra contiene evidencia suficiente.',
+    findings: [
+      {
+        id: 'communication-retry',
+        dimension: 'communication',
+        type: 'coverage',
+        claim: 'La respuesta desarrolla la tarea.',
+        tokenStart: 0,
+        tokenEnd: 2,
+        quote: 'I described it',
+        correction: '',
+        certainty: 0.9,
+      },
+      {
+        id: 'grammar-retry',
+        dimension: 'grammar',
+        type: 'strength',
+        claim: 'La respuesta usa pasado simple.',
+        tokenStart: 3,
+        tokenEnd: 5,
+        quote: 'and explained why',
+        correction: '',
+        certainty: 0.9,
+      },
+      {
+        id: 'vocabulary-retry',
+        dimension: 'vocabulary',
+        type: 'strength',
+        claim: 'La respuesta usa vocabulario pertinente.',
+        tokenStart: 6,
+        tokenEnd: 8,
+        quote: 'the trip mattered',
+        correction: '',
+        certainty: 0.9,
+      },
+    ],
+  };
+  const client = {
+    chat: {
+      completions: {
+        async create() {
+          attempts++;
+          if (attempts === 1) {
+            const error = new Error('rate limited');
+            error.status = 429;
+            error.headers = new Map([['retry-after', '0']]);
+            throw error;
+          }
+          return {
+            choices: [{ message: { content: JSON.stringify(response) } }],
+          };
+        },
+      },
+    },
+  };
+
+  const evidence = await extractLinguisticEvidence({
+    client,
+    model: 'test-model',
+    rubric: { spec: { mode: 'spontaneous' } },
+    transcript:
+      'I described it and explained why the trip mattered to my family.',
+    secondaryTranscript: '',
+    quality: { metrics: { durationSeconds: 20, voicedSeconds: 16 } },
+    providerDisagreement: null,
+  });
+
+  assert.equal(attempts, 2);
+  assert.equal(evidence.sufficientEvidence, true);
+  assert.equal(evidence.findings.length, 3);
 });
 
 test('una muestra espontánea pasa con 15 s de voz aunque tenga menos de 30 palabras', async () => {

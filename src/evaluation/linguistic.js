@@ -23,7 +23,7 @@ const evidenceSchema = {
     summary: { type: 'string' },
     findings: {
       type: 'array',
-      maxItems: 30,
+      maxItems: 18,
       items: {
         type: 'object',
         additionalProperties: false,
@@ -228,6 +228,57 @@ function retryableProviderError(error) {
   ].includes(error?.code ?? error?.name);
 }
 
+function providerHeader(error, name) {
+  const headers = error?.headers;
+  if (typeof headers?.get === 'function') {
+    return headers.get(name);
+  }
+  if (headers && typeof headers === 'object') {
+    return headers[name] ?? headers[name.toLowerCase()] ?? null;
+  }
+  return null;
+}
+
+function parseDurationMilliseconds(value) {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  const trimmed = value.trim().toLowerCase();
+  if (/^\d+(\.\d+)?$/.test(trimmed)) {
+    return Number(trimmed) * 1000;
+  }
+  let milliseconds = 0;
+  let matched = false;
+  for (const match of trimmed.matchAll(/(\d+(?:\.\d+)?)(ms|s|m|h)/g)) {
+    matched = true;
+    const number = Number(match[1]);
+    milliseconds +=
+      match[2] === 'ms'
+        ? number
+        : match[2] === 's'
+          ? number * 1000
+          : match[2] === 'm'
+            ? number * 60_000
+            : number * 3_600_000;
+  }
+  return matched ? milliseconds : null;
+}
+
+function retryDelayMilliseconds(error, attempt) {
+  const retryAfter = parseDurationMilliseconds(
+    providerHeader(error, 'retry-after'),
+  );
+  const tokenReset = parseDurationMilliseconds(
+    providerHeader(error, 'x-ratelimit-reset-tokens'),
+  );
+  const providerDelay = retryAfter ?? tokenReset;
+  if (providerDelay !== null) {
+    return Math.min(90_000, Math.max(250, Math.ceil(providerDelay) + 250));
+  }
+  if (error?.status === 429) {
+    return Math.min(30_000, 8_000 * (attempt + 1));
+  }
+  return 500 * 3 ** attempt + Math.floor(Math.random() * 250);
+}
+
 async function callStructured({
   client,
   model,
@@ -264,7 +315,7 @@ async function callStructured({
             json_schema: { name: schemaName, strict: true, schema },
           },
           },
-          { timeout: 90_000 },
+          { timeout: 120_000 },
         ),
       );
       break;
@@ -273,10 +324,7 @@ async function callStructured({
       const retryable = retryableProviderError(error);
       if (!retryable || attempt === 2) break;
       await new Promise((resolve) =>
-        setTimeout(
-          resolve,
-          250 * 3 ** attempt + Math.floor(Math.random() * 150),
-        ),
+        setTimeout(resolve, retryDelayMilliseconds(error, attempt)),
       );
     }
   }
@@ -582,7 +630,7 @@ export async function extractLinguisticEvidence({
     model,
     schema: evidenceSchema,
     schemaName: 'gordon_linguistic_evidence',
-    maxTokens: 5000,
+    maxTokens: 3200,
     system: INTERNAL_PROMPTS.evidenceExtractor,
     payload: {
       rubric,
@@ -607,7 +655,7 @@ export async function extractLinguisticEvidence({
       model,
       schema: evidenceSchema,
       schemaName: 'gordon_linguistic_evidence_repair',
-      maxTokens: 5000,
+      maxTokens: 3200,
       system: INTERNAL_PROMPTS.evidenceExtractor,
       payload: {
         rubric,
@@ -825,22 +873,22 @@ export async function runDoubleLinguisticJudging({
       promptVersion: PROMPT_VERSION,
     };
   }
-  const [analytic, holistic] = await Promise.all([
-    runJudge({
-      client,
-      model,
-      rubric,
-      evidence,
-      perspective: 'analytic',
-    }),
-    runJudge({
-      client,
-      model,
-      rubric,
-      evidence,
-      perspective: 'holistic',
-    }),
-  ]);
+  // Los contextos siguen siendo independientes, pero se ejecutan en serie
+  // para no duplicar el consumo instantáneo del límite TPM de Groq.
+  const analytic = await runJudge({
+    client,
+    model,
+    rubric,
+    evidence,
+    perspective: 'analytic',
+  });
+  const holistic = await runJudge({
+    client,
+    model,
+    rubric,
+    evidence,
+    perspective: 'holistic',
+  });
   const disputedIds = LINGUISTIC_DIMENSIONS.filter((id) => {
     const a = analytic[id];
     const b = holistic[id];
