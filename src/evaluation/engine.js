@@ -124,6 +124,12 @@ export function pronunciationFromPhoneticJudge({
     phoneticEvidence.confidence >= 0.65
       ? 'medium'
       : 'low';
+  const alignments = new Map(
+    (judged.wordAlignments ?? []).map((alignment) => [
+      alignment.id,
+      alignment,
+    ]),
+  );
   return dimensionResult({
     id: 'pronunciation',
     status: 'scored',
@@ -136,17 +142,22 @@ export function pronunciationFromPhoneticJudge({
     },
     reliability,
     methodId: 'gpt-oss-phonetic-judge-v1',
-    evidence: (judged.observations ?? []).map((observation, index) => ({
-      id: `phonetic-observation-${index}`,
-      kind: 'phoneticComparison',
-      claim:
-        `Esperado: ${observation.expected}. Observado: ${observation.observed}. ` +
-        observation.explanation,
-      expected: observation.expected,
-      observed: observation.observed,
-      affectsIntelligibility: observation.affectsIntelligibility,
-      source: 'wav2vec2-local+gpt-oss',
-    })),
+    evidence: (judged.observations ?? []).map((observation, index) => {
+      const alignment = alignments.get(observation.alignmentId);
+      return {
+        id: `phonetic-observation-${index}`,
+        kind: 'phoneticComparison',
+        claim:
+          `Esperado: ${observation.expected}. Observado: ${observation.observed}. ` +
+          observation.explanation,
+        expected: observation.expected,
+        observed: observation.observed,
+        affectsIntelligibility: observation.affectsIntelligibility,
+        startSec: alignment?.startSec ?? null,
+        endSec: alignment?.endSec ?? null,
+        source: 'wav2vec2-local+gpt-oss',
+      };
+    }),
     limitations: [
       judged.rationale,
       ifPronunciationWasForced(judged),
@@ -203,8 +214,16 @@ export function provisionalFluencyFromTimings({
         pauseCount++;
       }
     }
-    const phonemesPerSecond =
-      articulatedSeconds > 0 ? events.length / articulatedSeconds : 0;
+    const effectiveVoice =
+      Number.isFinite(voicedSeconds) && voicedSeconds > 0
+        ? voicedSeconds
+        : Math.max(
+            0.001,
+            (events.at(-1)?.endSec ?? 0) -
+              (events[0]?.startSec ?? 0) -
+              pauseSeconds,
+          );
+    const phonemesPerSecond = events.length / effectiveVoice;
     const paceScore = clampScore(100 - Math.abs(phonemesPerSecond - 12) * 8);
     const continuityBase =
       Number.isFinite(durationSeconds) && durationSeconds > 0
@@ -213,7 +232,7 @@ export function provisionalFluencyFromTimings({
     const continuityScore = clampScore(continuityBase * 100);
     score = clampScore(paceScore * 0.45 + continuityScore * 0.55);
     claim =
-      `${events.length} fonemas temporizados; ritmo ${phonemesPerSecond.toFixed(1)} fonemas/s; ` +
+      `${events.length} fonemas en ${effectiveVoice.toFixed(1)} s de voz; ritmo ${phonemesPerSecond.toFixed(1)} fonemas/s; ` +
       `${pauseCount} pausas internas de al menos 0.25 s.`;
     methodId = 'wav2vec2-timing-provisional-v1';
   } else {
@@ -580,6 +599,7 @@ export async function runAssessment({
         model: linguisticModel,
         rubric,
         transcript: whisperEvidence.text,
+        words: whisperEvidence.words,
         phoneticEvidence,
       });
     } catch (error) {

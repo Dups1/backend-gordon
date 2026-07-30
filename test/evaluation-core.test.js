@@ -224,6 +224,7 @@ test('puntúa fluidez con cualquier secuencia fonética temporizada', () => {
   assert.equal(result.reliability, 'low');
   assert.equal(result.methodId, 'wav2vec2-timing-provisional-v1');
   assert.ok(result.score >= 0 && result.score <= 100);
+  assert.match(result.evidence[0].claim, /4\.4 fonemas\/s/);
 });
 
 test('no descarta pronunciación cuando el juez considera limitada la confianza', () => {

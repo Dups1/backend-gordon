@@ -94,8 +94,9 @@ test('juzga IPA con inteligibilidad y contexto de lengua materna', async () => {
         'La realización conserva suficiente inteligibilidad aunque refleja transferencia del español.',
       observations: [
         {
+          alignmentId: 'w0',
           expected: 'dʒəˈpæn',
-          observed: 'ðæpən',
+          observed: 'contenido que el juez no puede alterar',
           explanation:
             'Hay sustitución consonántica, pero la palabra permanece reconocible en contexto.',
           affectsIntelligibility: false,
@@ -116,21 +117,43 @@ test('juzga IPA con inteligibilidad y contexto de lengua materna', async () => {
       },
     },
     transcript: 'Japan route.',
+    words: [
+      { word: 'Japan', start: 0, end: 0.55 },
+      { word: 'route', start: 0.6, end: 1.1 },
+    ],
     phoneticEvidence: {
       transcript: 'ðæpən ɹoʊt',
       model: 'wav2vec2-phoneme-en',
       confidence: 0.702,
+      events: [
+        { phoneme: 'ð', startSec: 0.02, endSec: 0.1, confidence: 0.7 },
+        { phoneme: 'æ', startSec: 0.12, endSec: 0.2, confidence: 0.72 },
+        { phoneme: 'p', startSec: 0.22, endSec: 0.3, confidence: 0.71 },
+        { phoneme: 'ə', startSec: 0.32, endSec: 0.4, confidence: 0.69 },
+        { phoneme: 'n', startSec: 0.42, endSec: 0.5, confidence: 0.7 },
+        { phoneme: 'ɹ', startSec: 0.62, endSec: 0.7, confidence: 0.73 },
+        { phoneme: 'oʊ', startSec: 0.72, endSec: 0.88, confidence: 0.72 },
+        { phoneme: 't', startSec: 0.9, endSec: 1.02, confidence: 0.71 },
+      ],
     },
   });
 
   assert.equal(result.status, 'scored');
   assert.equal(result.band, 3);
+  assert.equal(result.observations[0].observed, 'ðæpən');
   const systemPrompt = client.calls[0].messages[0].content;
   assert.match(systemPrompt, /no exijas acento nativo/i);
   const payload = JSON.parse(client.calls[0].messages[1].content).data;
   assert.equal(payload.nativeLanguage, 'español');
   assert.equal(payload.observedIpa, 'ðæpən ɹoʊt');
   assert.equal(payload.orthographicTranscript, 'Japan route.');
+  assert.deepEqual(
+    payload.wordAlignments.map((item) => [item.word, item.observedIpa]),
+    [
+      ['Japan', 'ðæpən'],
+      ['route', 'ɹoʊt'],
+    ],
+  );
   assert.equal(client.pendingResponses, 0);
 });
 
