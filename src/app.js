@@ -1193,6 +1193,8 @@ export function createApp({
             providerErrors: {
               linguistic:
                 report.providerEvidence?.linguistic?.error ?? null,
+              pronunciation:
+                report.providerEvidence?.phonetic?.error ?? null,
             },
             dimensions: Object.fromEntries(
               Object.entries(report.dimensions ?? {}).map(

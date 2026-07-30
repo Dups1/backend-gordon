@@ -8,7 +8,7 @@ import {
 
 export const SCHEMA_VERSION = '2.0.0';
 export const CALIBRATION_VERSION = 'provisional-en-US-v1';
-export const PROMPT_VERSION = 'gordon-evidence-v1.4';
+export const PROMPT_VERSION = 'gordon-evidence-v1.5';
 export const SUPPORTED_LOCALE = 'en-US';
 export const DIMENSION_IDS = Object.freeze([
   'communication',

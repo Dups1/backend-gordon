@@ -608,6 +608,7 @@ export async function runAssessment({
         message:
           error?.message ??
           'El juez fonético no pudo completar la comparación.',
+        details: error?.details ?? null,
       };
     }
   }

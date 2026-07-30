@@ -18,6 +18,7 @@ function structuredClient(responses) {
           calls.push({ ...options, requestOptions });
           const content = pending.shift();
           assert.ok(content, 'La prueba no configuró una respuesta del modelo.');
+          if (content instanceof Error) throw content;
           return {
             choices: [{ message: { content: JSON.stringify(content) } }],
           };
@@ -87,16 +88,13 @@ function judgeResponse({ invalidCitations = false } = {}) {
 test('juzga IPA con inteligibilidad y contexto de lengua materna', async () => {
   const client = structuredClient([
     {
-      status: 'scored',
       band: 3,
-      expectedIpa: 'dʒəˈpæn ɹuːt',
       rationale:
         'La realización conserva suficiente inteligibilidad aunque refleja transferencia del español.',
       observations: [
         {
           alignmentId: 'w0',
           expected: 'dʒəˈpæn',
-          observed: 'contenido que el juez no puede alterar',
           explanation:
             'Hay sustitución consonántica, pero la palabra permanece reconocible en contexto.',
           affectsIntelligibility: false,
@@ -145,7 +143,7 @@ test('juzga IPA con inteligibilidad y contexto de lengua materna', async () => {
   assert.match(systemPrompt, /no exijas acento nativo/i);
   const payload = JSON.parse(client.calls[0].messages[1].content).data;
   assert.equal(payload.nativeLanguage, 'español');
-  assert.equal(payload.observedIpa, 'ðæpən ɹoʊt');
+  assert.equal(payload.observedIpa, undefined);
   assert.equal(payload.orthographicTranscript, 'Japan route.');
   assert.deepEqual(
     payload.wordAlignments.map((item) => [item.word, item.observedIpa]),
@@ -154,6 +152,70 @@ test('juzga IPA con inteligibilidad y contexto de lengua materna', async () => {
       ['route', 'ɹoʊt'],
     ],
   );
+  assert.equal(client.pendingResponses, 0);
+});
+
+test('reintenta el juez fonético en JSON Object Mode tras un HTTP 400', async () => {
+  const rejected = Object.assign(
+    new Error('Invalid response_format configuration'),
+    {
+      status: 400,
+      error: { message: 'JSON schema configuration rejected' },
+    },
+  );
+  const client = structuredClient([
+    rejected,
+    {
+      band: 3,
+      rationale: 'La palabra sigue siendo inteligible.',
+      observations: [
+        {
+          alignmentId: 'w0',
+          expected: 'həˈloʊ',
+          explanation: 'La realización conserva la palabra.',
+          affectsIntelligibility: false,
+        },
+      ],
+    },
+  ]);
+
+  const result = await judgePronunciationFromPhonetics({
+    client,
+    model: 'test-model',
+    rubric: {
+      spec: {
+        mode: 'spontaneous',
+        targetLocale: 'en-US',
+        cefr: 'B1',
+        nativeLanguage: 'es',
+      },
+    },
+    transcript: 'Hello.',
+    words: [{ word: 'Hello', start: 0, end: 0.5 }],
+    phoneticEvidence: {
+      transcript: 'həloʊ',
+      model: 'wav2vec2-phoneme-en',
+      confidence: 0.8,
+      events: [
+        { phoneme: 'h', startSec: 0, endSec: 0.1, confidence: 0.8 },
+        { phoneme: 'ə', startSec: 0.12, endSec: 0.2, confidence: 0.8 },
+        { phoneme: 'l', startSec: 0.22, endSec: 0.3, confidence: 0.8 },
+        { phoneme: 'oʊ', startSec: 0.32, endSec: 0.48, confidence: 0.8 },
+      ],
+    },
+  });
+
+  assert.equal(result.status, 'scored');
+  assert.equal(result.band, 3);
+  assert.equal(result.observations[0].observed, 'həloʊ');
+  assert.equal(client.calls.length, 2);
+  assert.equal(client.calls[0].response_format.type, 'json_schema');
+  assert.equal(client.calls[1].response_format.type, 'json_object');
+  const fallbackPayload = JSON.parse(
+    client.calls[1].messages[1].content,
+  );
+  assert.equal(fallbackPayload.data.observedIpa, undefined);
+  assert.equal(fallbackPayload.outputSchema.required.includes('band'), true);
   assert.equal(client.pendingResponses, 0);
 });
 
