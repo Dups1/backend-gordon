@@ -203,6 +203,8 @@ test('usa JSON Object Mode y valida localmente el juez fonético', async () => {
   assert.equal(result.observations[0].observed, 'həloʊ');
   assert.equal(client.calls.length, 1);
   assert.equal(client.calls[0].response_format.type, 'json_object');
+  assert.deepEqual(client.calls[0].thinking, { type: 'disabled' });
+  assert.equal(client.calls[0].max_tokens, 8000);
   const outputPayload = JSON.parse(client.calls[0].messages[1].content);
   assert.equal(outputPayload.data.observedIpa, undefined);
   assert.equal(outputPayload.outputSchema.required.includes('band'), true);
@@ -270,8 +272,170 @@ test('recupera una mejora de consigna cuando OpenCode entrega contenido vacío',
   assert.equal(result.improvedInstruction, improvement.improvedInstruction);
   assert.equal(calls.length, 2);
   assert.equal(calls[0].response_format.type, 'json_object');
+  assert.deepEqual(calls[0].thinking, { type: 'disabled' });
   assert.equal(calls[1].response_format, undefined);
+  assert.deepEqual(calls[1].thinking, { type: 'disabled' });
   assert.ok(calls[1].max_tokens > calls[0].max_tokens);
+});
+
+test('recupera evidencia y pronunciación si DeepSeek agota el primer intento razonando', async () => {
+  const emptyLengthResponse = (maxTokens) => ({
+    choices: [
+      {
+        finish_reason: 'length',
+        message: { content: '' },
+      },
+    ],
+    usage: { completion_tokens: maxTokens },
+  });
+  const evidenceResponse = {
+    sufficientEvidence: true,
+    taskCoverage: 0.8,
+    summary: 'La respuesta contiene evidencia evaluable.',
+    findings: [
+      {
+        id: 'communication-recovery',
+        dimension: 'communication',
+        type: 'coverage',
+        claim: 'La respuesta desarrolla la experiencia solicitada.',
+        tokenStart: 0,
+        tokenEnd: 3,
+        quote: 'I described my experience',
+        correction: '',
+        certainty: 0.9,
+      },
+      {
+        id: 'grammar-recovery',
+        dimension: 'grammar',
+        type: 'strength',
+        claim: 'La respuesta utiliza pasado simple.',
+        tokenStart: 4,
+        tokenEnd: 7,
+        quote: 'and explained what happened',
+        correction: '',
+        certainty: 0.9,
+      },
+      {
+        id: 'vocabulary-recovery',
+        dimension: 'vocabulary',
+        type: 'strength',
+        claim: 'La respuesta usa vocabulario pertinente.',
+        tokenStart: 8,
+        tokenEnd: 11,
+        quote: 'during the school trip',
+        correction: '',
+        certainty: 0.9,
+      },
+    ],
+  };
+  const evidenceCalls = [];
+  const evidenceClient = {
+    chat: {
+      completions: {
+        async create(options) {
+          evidenceCalls.push(options);
+          if (evidenceCalls.length === 1) {
+            return emptyLengthResponse(options.max_tokens);
+          }
+          return {
+            choices: [
+              {
+                finish_reason: 'stop',
+                message: { content: JSON.stringify(evidenceResponse) },
+              },
+            ],
+          };
+        },
+      },
+    },
+  };
+
+  const evidence = await extractLinguisticEvidence({
+    client: evidenceClient,
+    model: 'deepseek-v4-flash',
+    rubric: { spec: { mode: 'spontaneous' } },
+    transcript:
+      'I described my experience and explained what happened during the school trip with my classmates and teacher.',
+    secondaryTranscript: '',
+    quality: { metrics: { durationSeconds: 20, voicedSeconds: 16 } },
+    providerDisagreement: null,
+  });
+
+  assert.equal(evidence.sufficientEvidence, true);
+  assert.equal(evidenceCalls.length, 2);
+  assert.equal(evidenceCalls[0].max_tokens, 8000);
+  assert.equal(evidenceCalls[1].max_tokens, 16000);
+  assert.deepEqual(evidenceCalls[0].thinking, { type: 'disabled' });
+
+  const pronunciationCalls = [];
+  const pronunciationClient = {
+    chat: {
+      completions: {
+        async create(options) {
+          pronunciationCalls.push(options);
+          if (pronunciationCalls.length === 1) {
+            return emptyLengthResponse(options.max_tokens);
+          }
+          return {
+            choices: [
+              {
+                finish_reason: 'stop',
+                message: {
+                  content: JSON.stringify({
+                    band: 3,
+                    rationale: 'La palabra permanece inteligible.',
+                    observations: [
+                      {
+                        alignmentId: 'w0',
+                        expected: 'həˈloʊ',
+                        explanation:
+                          'La realización conserva los contrastes principales.',
+                        affectsIntelligibility: false,
+                      },
+                    ],
+                  }),
+                },
+              },
+            ],
+          };
+        },
+      },
+    },
+  };
+
+  const pronunciation = await judgePronunciationFromPhonetics({
+    client: pronunciationClient,
+    model: 'deepseek-v4-flash',
+    rubric: {
+      spec: {
+        mode: 'spontaneous',
+        targetLocale: 'en-US',
+        cefr: 'B1',
+        nativeLanguage: 'es',
+      },
+    },
+    transcript: 'Hello.',
+    words: [{ word: 'Hello', start: 0, end: 0.5 }],
+    phoneticEvidence: {
+      transcript: 'həloʊ',
+      model: 'wav2vec2-phoneme-en',
+      confidence: 0.8,
+      events: [
+        { phoneme: 'h', startSec: 0, endSec: 0.1, confidence: 0.8 },
+        { phoneme: 'ə', startSec: 0.12, endSec: 0.2, confidence: 0.8 },
+        { phoneme: 'l', startSec: 0.22, endSec: 0.3, confidence: 0.8 },
+        { phoneme: 'oʊ', startSec: 0.32, endSec: 0.48, confidence: 0.8 },
+      ],
+    },
+  });
+
+  assert.equal(pronunciation.status, 'scored');
+  assert.equal(pronunciationCalls.length, 2);
+  assert.equal(pronunciationCalls[0].max_tokens, 8000);
+  assert.equal(pronunciationCalls[1].max_tokens, 16000);
+  assert.deepEqual(pronunciationCalls[0].thinking, {
+    type: 'disabled',
+  });
 });
 
 test('una muestra breve sigue siendo evidencia válida para las tres dimensiones', async () => {
@@ -384,7 +548,7 @@ test('una muestra de 24.8 s con voz y palabras suficientes llega al extractor', 
   assert.ok(evidence.sufficiency.lexicalCount >= 30);
   assert.ok(evidence.sufficiency.voicedSeconds >= 15);
   assert.equal(client.pendingResponses, 0);
-  assert.equal(client.calls[0].max_tokens, 1800);
+  assert.equal(client.calls[0].max_tokens, 8000);
   assert.equal(client.calls[0].requestOptions.maxRetries, 0);
 });
 
@@ -586,7 +750,7 @@ test('compacta una muestra larga antes de enviarla al extractor', async () => {
     Array.isArray(request.data.asrComparison.uncertainPrimaryTokenIndices),
   );
   assert.ok(client.calls[0].messages[1].content.length < 16_000);
-  assert.equal(client.calls[0].max_tokens, 1800);
+  assert.equal(client.calls[0].max_tokens, 8000);
 });
 
 test('conserva la extracción válida si falla una reparación complementaria', async () => {

@@ -15,6 +15,8 @@ import { withCircuitBreaker } from './resilience.js';
 const LINGUISTIC_DIMENSIONS = ['communication', 'grammar', 'vocabulary'];
 const DEFAULT_LINGUISTIC_TPM_LIMIT = 7500;
 const DEFAULT_LINGUISTIC_TPM_WINDOW_MS = 60_000;
+const MIN_STRUCTURED_COMPLETION_TOKENS = 8000;
+const RECOVERY_STRUCTURED_COMPLETION_TOKENS = 16000;
 const linguisticReservations = new Map();
 let linguisticQueueTail = Promise.resolve();
 
@@ -684,10 +686,15 @@ async function callStructured({
   payload,
   maxTokens = 2000,
 }) {
+  const initialCompletionBudget = Math.max(
+    maxTokens,
+    MIN_STRUCTURED_COMPLETION_TOKENS,
+  );
   const baseRequest = {
     model,
     temperature: 0,
-    max_tokens: maxTokens,
+    max_tokens: initialCompletionBudget,
+    thinking: { type: 'disabled' },
     messages: [
       { role: 'system', content: system },
       {
@@ -707,13 +714,13 @@ async function callStructured({
       let lastError;
       let lastRequestEstimate = estimateLinguisticRequestTokens(
         baseRequest,
-        maxTokens,
+        initialCompletionBudget,
       );
       let formatRecovery = false;
       for (let attempt = 0; attempt < 3; attempt++) {
         const completionBudget = formatRecovery
-          ? Math.min(8000, Math.max(maxTokens + 1200, maxTokens * 2))
-          : maxTokens;
+          ? RECOVERY_STRUCTURED_COMPLETION_TOKENS
+          : initialCompletionBudget;
         const request = formatRecovery
           ? {
               ...baseRequest,
@@ -789,8 +796,8 @@ async function callStructured({
         ...(failure.details ?? {}),
         ...lastRequestEstimate,
         maxCompletionTokens: formatRecovery
-          ? Math.min(8000, Math.max(maxTokens + 1200, maxTokens * 2))
-          : maxTokens,
+          ? RECOVERY_STRUCTURED_COMPLETION_TOKENS
+          : initialCompletionBudget,
         formatRecovery,
       };
       throw failure;

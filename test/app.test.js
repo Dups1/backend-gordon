@@ -61,7 +61,7 @@ test('expone el estado del servicio y el modelo configurado', async () => {
     service: 'backend-gordon',
     model: GROQ_MODEL,
     linguisticModel: LINGUISTIC_MODEL,
-    promptVersion: 'gordon-evidence-v1.7',
+    promptVersion: 'gordon-evidence-v1.8',
   });
 });
 
@@ -258,7 +258,8 @@ test('detecta errores gramaticales con evidencia literal y descarta inventados',
 
   assert.equal(opcionesGramatica.model, LINGUISTIC_MODEL);
   assert.equal(opcionesGramatica.response_format.type, 'json_object');
-  assert.equal(opcionesGramatica.max_tokens, 1800);
+  assert.equal(opcionesGramatica.max_tokens, 8000);
+  assert.deepEqual(opcionesGramatica.thinking, { type: 'disabled' });
   assert.match(
     opcionesGramatica.messages[1].content,
     /<instruccion_docente>\nEvalúa concordancia para nivel A2\.\n<\/instruccion_docente>/,

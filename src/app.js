@@ -644,7 +644,8 @@ export async function evaluarGramaticaDeepSeek({
   const respuesta = await cliente.chat.completions.create({
     model: modelo,
     temperature: 0,
-    max_tokens: 1800,
+    max_tokens: 8000,
+    thinking: { type: 'disabled' },
     messages: [
       {
         role: 'system',

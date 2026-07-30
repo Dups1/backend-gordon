@@ -1,5 +1,5 @@
 {
-  "promptVersion": "gordon-evidence-v1.7",
+  "promptVersion": "gordon-evidence-v1.8",
   "files": {
     "securityEnvelope": "security-envelope.txt",
     "instructionImprover": "instruction-improver.txt",
