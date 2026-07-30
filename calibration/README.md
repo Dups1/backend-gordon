@@ -69,4 +69,4 @@ Qwen3.6-27B se entrenará solamente después de reunir 5,000 respuestas distinta
 con etiquetas humanas. GPT-OSS es baseline, no ground truth. Qwen se ejecutará
 en sombra y solo se promoverá si reduce MAE al menos 1.5 puntos con bootstrap
 pareado, sin regresión mayor a 2 puntos por subgrupo ni aumento de evidencia
-inventada. Los scores acústicos de Azure nunca serán modificados por el LLM.
+inventada. Las métricas acústicas nunca serán modificadas por el LLM.

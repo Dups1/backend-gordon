@@ -6,25 +6,25 @@ import {
   SCORE_PROFILES,
   dimensionResult,
   calculateOverall,
-  finiteScore,
+  expectedScore,
   newAssessmentId,
   normalizeTokens,
-  probabilitiesForScore,
+  probabilitiesForBand,
 } from './domain.js';
 import {
   extractLinguisticEvidence,
   generatePedagogicalFeedback,
+  judgePronunciationFromPhonetics,
   runDoubleLinguisticJudging,
 } from './linguistic.js';
 import {
-  evaluateAzureV2,
-  transcriptComparison,
   transcribeWhisper,
 } from './providers.js';
 import {
   PROMPT_EXAMPLES_STATUS,
   PROMPT_MANIFEST_HASH,
 } from './prompts.js';
+import { WHISPER_LITERAL_POLICY_VERSION } from '../whisper.js';
 
 function limitationForMode(rubric, id) {
   if (
@@ -78,143 +78,86 @@ function attachLinguisticTimestamps(evidence, whisper) {
   };
 }
 
-function evidenceForAzure(azure, id) {
-  if (!azure) return [];
-  if (id === 'pronunciation') {
-    return (azure.words ?? [])
-      .filter((word) => finiteScore(word.accuracyScore) !== null)
-      .sort((a, b) => a.accuracyScore - b.accuracyScore)
-      .slice(0, 8)
-      .map((word, index) => ({
-        id: `azure-word-${index}`,
-        kind: 'word',
-        claim: `Realización acústica de “${word.word}”.`,
-        metric: 'accuracyScore',
-        value: word.accuracyScore,
-        unit: '0-100',
-        startSec: word.start,
-        endSec:
-          word.start !== null && word.duration !== null
-            ? word.start + word.duration
-            : null,
-        source: 'azure-speech',
-        errorType: word.errorType,
-        phonemes: word.phonemes,
-      }));
-  }
-  return [
-    {
-      id: 'azure-fluency',
-      kind: 'acousticMetric',
-      claim: 'Fluidez acústica medida por Azure Speech.',
-      metric: 'fluencyScore',
-      value: azure.fluencyScore,
-      unit: '0-100',
-      source: 'azure-speech',
-    },
-    ...(finiteScore(azure.prosodyScore) !== null
-      ? [
-          {
-            id: 'azure-prosody',
-            kind: 'acousticMetric',
-            claim: 'Prosodia medida por Azure Speech.',
-            metric: 'prosodyScore',
-            value: azure.prosodyScore,
-            unit: '0-100',
-            source: 'azure-speech',
-          },
-        ]
-      : []),
-  ];
-}
-
-function unavailableAcoustic(id, error, constructScope) {
-  const providerRejected = error?.code === 'INVALID_PROVIDER_SCORE';
+function unavailableAcoustic(id, constructScope) {
   return dimensionResult({
     id,
-    status: providerRejected ? 'providerError' : 'unavailable',
-    methodId: 'azure-pronunciation-assessment',
+    status: 'unavailable',
+    methodId: 'local-phonetic-alignment-pending',
     reliability: 'unknown',
-    reasonCode: error?.code ?? 'AZURE_UNAVAILABLE',
+    reasonCode: 'LOCAL_PHONETIC_SCORING_PENDING',
     limitations: [
-      error?.message ??
-        'Azure Speech no entregó evidencia para esta dimensión.',
+      'La puntuación acústica está pendiente de integrar el motor fonético local con alineación contra la pronunciación esperada.',
     ],
     constructScope,
     reviewRequired: true,
   });
 }
 
-function acousticDimension({
-  id,
-  score,
-  rawScore,
-  azure,
-  quality,
-  transcriptReview,
+function pronunciationFromPhoneticJudge({
+  judged,
+  error,
+  phoneticEvidence,
   constructScope,
 }) {
-  const valid = finiteScore(score);
-  if (score !== null && score !== undefined && valid === null) {
+  if (error) {
     return dimensionResult({
-      id,
+      id: 'pronunciation',
       status: 'providerError',
-      methodId: 'azure-pronunciation-assessment',
+      methodId: 'gpt-oss-phonetic-judge-v1',
       reliability: 'unknown',
-      reasonCode: 'INVALID_PROVIDER_SCORE',
-      limitations: [
-        `Azure devolvió un valor inválido para ${id}; no fue limitado ni reinterpretado.`,
-      ],
+      reasonCode: error.code ?? 'PHONETIC_JUDGE_ERROR',
+      limitations: [error.message],
       constructScope,
       reviewRequired: true,
     });
   }
-  if (valid === null) {
-    return unavailableAcoustic(
-      id,
-      {
-        code: 'AZURE_SCORE_MISSING',
-        message: `Azure no entregó una puntuación válida de ${id}.`,
-      },
-      constructScope,
-    );
-  }
-  const lowEvidence =
-    quality.warnings.includes('INSUFFICIENT_ACOUSTIC_SAMPLE') ||
-    quality.warnings.includes('INSUFFICIENT_READING_SAMPLE');
-  if (lowEvidence) {
+  if (!judged) return unavailableAcoustic('pronunciation', constructScope);
+  if (judged.status !== 'scored' || judged.band === 0) {
     return dimensionResult({
-      id,
+      id: 'pronunciation',
       status: 'insufficientEvidence',
-      methodId: 'azure-provisional-calibration',
+      methodId: 'gpt-oss-phonetic-judge-v1',
       reliability: 'low',
-      rawScore,
-      evidence: evidenceForAzure(azure, id),
-      limitations: ['La muestra no alcanza la duración acústica recomendada.'],
-      reasonCode: 'INSUFFICIENT_ACOUSTIC_SAMPLE',
+      reasonCode: 'PHONETIC_EVIDENCE_INSUFFICIENT',
+      evidence: [],
+      limitations: [judged.rationale],
       constructScope,
       reviewRequired: true,
     });
   }
-  const reviewRequired =
-    quality.status === 'warning' || transcriptReview === true;
-  const halfWidth = reviewRequired ? 15 : 10;
+  const probabilities = probabilitiesForBand(judged.band, 0.3);
+  const score = expectedScore(probabilities);
+  const reliability =
+    typeof phoneticEvidence?.confidence === 'number' &&
+    phoneticEvidence.confidence >= 0.65
+      ? 'medium'
+      : 'low';
   return dimensionResult({
-    id,
+    id: 'pronunciation',
     status: 'scored',
-    score: valid,
-    rawScore,
-    probabilities: probabilitiesForScore(valid),
+    score,
+    rawScore: null,
+    probabilities,
     interval90: {
-      low: Math.max(0, valid - halfWidth),
-      high: Math.min(100, valid + halfWidth),
+      low: Math.max(0, score - 15),
+      high: Math.min(100, score + 15),
     },
-    reliability: reviewRequired ? 'low' : 'medium',
-    methodId: 'azure-provisional-calibration',
-    evidence: evidenceForAzure(azure, id),
+    reliability,
+    methodId: 'gpt-oss-phonetic-judge-v1',
+    evidence: (judged.observations ?? []).map((observation, index) => ({
+      id: `phonetic-observation-${index}`,
+      kind: 'phoneticComparison',
+      claim:
+        `Esperado: ${observation.expected}. Observado: ${observation.observed}. ` +
+        observation.explanation,
+      expected: observation.expected,
+      observed: observation.observed,
+      affectsIntelligibility: observation.affectsIntelligibility,
+      source: 'wav2vec2-local+gpt-oss',
+    })),
     limitations: [
-      'Las probabilidades de banda son una proyección ordinal provisional del score de Azure, no una calibración humana final.',
-      'Resultado provisional pendiente de calibración con evaluadores humanos.',
+      judged.rationale,
+      'Resultado provisional: la secuencia IPA local y el juez todavía requieren calibración humana.',
     ],
     constructScope,
     reviewRequired: true,
@@ -334,10 +277,8 @@ export async function runAssessment({
   groqClient,
   linguisticModel,
   whisperModel,
-  azureConfig,
-  evaluateAzureRest,
-  evaluateAzureContinuous,
   analyzeSpeech,
+  phoneticEvidence,
   requestId,
 }) {
   const assessmentId = newAssessmentId();
@@ -354,6 +295,7 @@ export async function runAssessment({
       referenceText:
         rubric.spec.mode === 'reading' ? rubric.spec.referenceText : null,
       communicativePurpose: rubric.spec.communicativePurpose,
+      nativeLanguage: rubric.spec.nativeLanguage,
     },
     rubric: {
       id: rubric.id,
@@ -431,36 +373,20 @@ export async function runAssessment({
       chunks: [],
       chunking: null,
     };
-  let azure = null;
-  let azureError = null;
-  try {
-    azure = await evaluateAzureV2({
-      normalizedPath: normalizedAudio,
-      durationSeconds: quality.metrics.durationSeconds,
-      rubric,
-      whisper: whisperEvidence,
-      quality,
-      azureConfig,
-      evaluateRest: evaluateAzureRest,
-      evaluateContinuous: evaluateAzureContinuous,
-    });
-  } catch (error) {
-    azureError = {
-      code: error?.code ?? 'AZURE_PROVIDER_ERROR',
-      message:
-        error?.message ??
-        'Azure Speech no pudo completar la evaluación acústica.',
-      details: error?.details ?? null,
-    };
-  }
-  const comparedTranscript = transcriptComparison(whisperEvidence, azure);
   const transcript = {
-    ...comparedTranscript,
     primary: {
-      ...comparedTranscript.primary,
+      provider: 'groq',
+      text: whisperEvidence.text,
+      language: whisperEvidence.language,
+      words: whisperEvidence.words,
+      segments: whisperEvidence.segments,
+      chunking: whisperEvidence.chunking,
       status: whisper ? 'complete' : 'unavailable',
       error: whisperError,
     },
+    secondary: null,
+    providerDisagreement: null,
+    reviewRequired: false,
   };
   let speechEvidence = {
     pauses: { status: 'unavailable', items: null },
@@ -473,7 +399,7 @@ export async function runAssessment({
         rutaAudio: normalizedAudio,
         palabras: whisperEvidence.words,
         duracionSegundos: quality.metrics.durationSeconds,
-        pronunciacion: azure,
+        pronunciacion: null,
       });
       speechEvidence = {
         pauses: {
@@ -512,7 +438,9 @@ export async function runAssessment({
           model: linguisticModel,
           rubric,
           transcript: transcript.primary.text,
-          secondaryTranscript: transcript.secondary?.text ?? '',
+          secondaryTranscript: '',
+          secondaryRecognitionStatus: null,
+          secondaryConfidence: null,
           quality,
           providerDisagreement: transcript.providerDisagreement,
         }),
@@ -534,6 +462,26 @@ export async function runAssessment({
       };
     }
   }
+  let pronunciationJudging = null;
+  let pronunciationError = null;
+  if (whisper && phoneticEvidence?.transcript) {
+    try {
+      pronunciationJudging = await judgePronunciationFromPhonetics({
+        client: groqClient,
+        model: linguisticModel,
+        rubric,
+        transcript: whisperEvidence.text,
+        phoneticEvidence,
+      });
+    } catch (error) {
+      pronunciationError = {
+        code: error?.code ?? 'PHONETIC_JUDGE_ERROR',
+        message:
+          error?.message ??
+          'El juez fonético no pudo completar la comparación.',
+      };
+    }
+  }
   const scopes = Object.fromEntries(
     rubric.dimensions.map((dimension) => [
       dimension.id,
@@ -548,17 +496,12 @@ export async function runAssessment({
       rubric,
       providerError: linguisticError,
     }),
-    pronunciation: azure
-      ? acousticDimension({
-          id: 'pronunciation',
-          score: azure.accuracyScore ?? azure.pronunciationScore,
-          rawScore: azure.pronunciationScore,
-          azure,
-          quality,
-          transcriptReview: transcript.reviewRequired,
-          constructScope: scopes.pronunciation,
-        })
-      : unavailableAcoustic('pronunciation', azureError, scopes.pronunciation),
+    pronunciation: pronunciationFromPhoneticJudge({
+      judged: pronunciationJudging,
+      error: pronunciationError,
+      phoneticEvidence,
+      constructScope: scopes.pronunciation,
+    }),
     grammar: linguisticDimension({
       id: 'grammar',
       judged: judging,
@@ -573,17 +516,7 @@ export async function runAssessment({
       rubric,
       providerError: linguisticError,
     }),
-    fluency: azure
-      ? acousticDimension({
-          id: 'fluency',
-          score: azure.fluencyScore,
-          rawScore: azure.fluencyScore,
-          azure,
-          quality,
-          transcriptReview: transcript.reviewRequired,
-          constructScope: scopes.fluency,
-        })
-      : unavailableAcoustic('fluency', azureError, scopes.fluency),
+    fluency: unavailableAcoustic('fluency', scopes.fluency),
   };
   const overall = calculateOverall(
     dimensions,
@@ -637,28 +570,10 @@ export async function runAssessment({
             temperature: 0,
             responseFormat: 'verbose_json',
             timestampGranularities: ['word', 'segment'],
+            transcriptionPolicy: WHISPER_LITERAL_POLICY_VERSION,
+            vocabularyHintsApplied: false,
           },
         },
-        azure: azure
-          ? {
-              provider: 'azure-speech',
-              locale: rubric.spec.targetLocale,
-              mode: rubric.spec.mode,
-              region: azureConfig?.region ?? null,
-              requestId: azure.requestId ?? null,
-              aggregation: azure.aggregation ?? { method: 'single' },
-              parameters: {
-                referenceText:
-                  rubric.spec.mode === 'reading' ? 'canonical' : 'none',
-                granularity: 'phoneme',
-                prosody: rubric.spec.targetLocale === 'en-US',
-                recognitionMode: azure.recognitionMode,
-                continuous: azure.recognitionMode === 'continuous',
-                continuousThresholdSeconds:
-                  azure.recognitionThresholdSeconds,
-              },
-            }
-          : { provider: 'azure-speech', error: azureError },
         linguistic: {
           provider: 'groq',
           model: linguisticModel,
@@ -670,6 +585,16 @@ export async function runAssessment({
             reasoningEffort: 'low',
             responseFormat: 'json_schema_strict',
           },
+        },
+        phonetic: {
+          provider: 'wav2vec2-local',
+          model: phoneticEvidence?.model ?? null,
+          status: phoneticEvidence?.transcript
+            ? 'complete'
+            : 'unavailable',
+          confidence: phoneticEvidence?.confidence ?? null,
+          nativeLanguage: rubric.spec.nativeLanguage,
+          judgeModel: linguisticModel,
         },
       },
       calibrationVersion: CALIBRATION_VERSION,
@@ -687,11 +612,15 @@ export async function runAssessment({
         chunks: whisperEvidence.chunks,
         error: whisperError,
       },
-      azure,
       linguistic: {
         evidence: linguisticEvidence,
         judging,
         error: linguisticError,
+      },
+      phonetic: {
+        input: phoneticEvidence ?? null,
+        judging: pronunciationJudging,
+        error: pronunciationError,
       },
     },
     _private: {

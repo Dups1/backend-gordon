@@ -8,7 +8,7 @@ import {
 
 export const SCHEMA_VERSION = '2.0.0';
 export const CALIBRATION_VERSION = 'provisional-en-US-v1';
-export const PROMPT_VERSION = 'gordon-evidence-v1.1';
+export const PROMPT_VERSION = 'gordon-evidence-v1.2';
 export const SUPPORTED_LOCALE = 'en-US';
 export const DIMENSION_IDS = Object.freeze([
   'communication',
@@ -45,6 +45,7 @@ export const SCORE_PROFILES = Object.freeze({
 
 const cefrLevels = new Set(['A1', 'A2', 'B1', 'B2', 'C1', 'C2']);
 const modes = new Set(['reading', 'spontaneous']);
+const nativeLanguages = new Set(['es', 'en', 'pt', 'fr', 'other']);
 const processSecret = randomBytes(32).toString('hex');
 
 export class EvaluationError extends Error {
@@ -131,6 +132,17 @@ export function normalizeEvaluationSpec(input = {}) {
       ? requiredText(input.referenceText, 'referenceText', { max: 15000 })
       : '';
   const profile = SCORE_PROFILES[mode];
+  const nativeLanguage =
+    typeof input.nativeLanguage === 'string'
+      ? input.nativeLanguage.trim().toLowerCase()
+      : 'other';
+  if (!nativeLanguages.has(nativeLanguage)) {
+    throw new EvaluationError(
+      400,
+      'La lengua materna seleccionada no es válida.',
+      'INVALID_NATIVE_LANGUAGE',
+    );
+  }
   return {
     mode,
     targetLocale,
@@ -139,6 +151,7 @@ export function normalizeEvaluationSpec(input = {}) {
     instruction,
     referenceText,
     communicativePurpose: optionalText(input.communicativePurpose),
+    nativeLanguage,
     targetConcepts: uniqueTexts(input.targetConcepts),
     vocabularyHints: uniqueTexts(input.vocabularyHints, {
       maxItems: 24,

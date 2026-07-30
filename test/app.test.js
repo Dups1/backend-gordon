@@ -10,6 +10,10 @@ import {
   GROQ_GRAMMAR_MODEL,
   GROQ_MODEL,
 } from '../src/app.js';
+import {
+  WHISPER_LITERAL_POLICY_VERSION,
+  whisperLiteralPrompt,
+} from '../src/whisper.js';
 
 function clienteGroqFalso(
   crearTranscripcion,
@@ -56,7 +60,7 @@ test('expone el estado del servicio y el modelo configurado', async () => {
     ok: true,
     service: 'backend-gordon',
     model: GROQ_MODEL,
-    promptVersion: 'gordon-evidence-v1.1',
+    promptVersion: 'gordon-evidence-v1.2',
   });
 });
 
@@ -122,7 +126,8 @@ test('envía el audio a Groq y devuelve la transcripción', async () => {
 
   assert.equal(opcionesRecibidas.model, 'whisper-large-v3');
   assert.equal(opcionesRecibidas.language, 'es');
-  assert.equal(opcionesRecibidas.prompt, 'Conversación académica');
+  assert.equal(opcionesRecibidas.prompt, whisperLiteralPrompt('es'));
+  assert.doesNotMatch(opcionesRecibidas.prompt, /Conversación académica/);
   assert.equal(opcionesRecibidas.response_format, 'verbose_json');
   assert.deepEqual(opcionesRecibidas.timestamp_granularities, [
     'word',
@@ -132,6 +137,7 @@ test('envía el audio a Groq y devuelve la transcripción', async () => {
   assert.deepEqual(response.body, {
     transcription: 'Transcripción completada.',
     model: 'whisper-large-v3',
+    transcriptionPolicy: WHISPER_LITERAL_POLICY_VERSION,
     language: 'es',
     duration: 3.4,
     words: [
@@ -166,8 +172,6 @@ test('envía el audio a Groq y devuelve la transcripción', async () => {
       errors: [],
     },
     grammarError: null,
-    pronunciation: null,
-    pronunciationError: null,
   });
   await assert.rejects(access(rutaTemporal));
 });
@@ -260,7 +264,7 @@ test('detecta errores gramaticales con evidencia literal y descarta inventados',
     opcionesGramatica.messages[1].content,
     /<evidencia_tecnica>\n.*"wordCount":6.*\n<\/evidencia_tecnica>/,
   );
-  assert.equal(opcionesWhisper.prompt, undefined);
+  assert.equal(opcionesWhisper.prompt, whisperLiteralPrompt('en'));
   assert.equal(response.body.grammar.score, 72);
   assert.equal(response.body.grammar.errors.length, 1);
   assert.equal(response.body.grammar.errors[0].original, 'She go');
@@ -284,7 +288,7 @@ test('rechaza instrucciones de evaluación mayores a 1000 caracteres', async () 
   assert.equal(response.body.error.code, 'INSTRUCCION_DEMASIADO_LARGA');
 });
 
-test('anota pausas y alargamientos sin alterar el texto limpio de Whisper', () => {
+test('anota pausas sin inventar alargamientos fonéticos', () => {
   const evidencia = crearEvidenciaHabla({
     duracionSegundos: 4,
     palabras: [
@@ -295,29 +299,14 @@ test('anota pausas y alargamientos sin alterar el texto limpio de Whisper', () =
       { word: 'David', start: 3.3, end: 3.8 },
     ],
     silencios: [{ start: 2.55, end: 3.25 }],
-    pronunciacion: {
-      words: [
-        {
-          word: 'is',
-          phonemes: [
-            { phoneme: 'ɪ', start: 1.2, duration: 0.2 },
-            { phoneme: 'z', start: 1.4, duration: 1.3 },
-          ],
-        },
-      ],
-    },
   });
 
   assert.equal(
     evidencia.annotatedTranscript,
-    'Hello my name is······· ...... David',
+    'Hello my name is ...... David',
   );
   assert.equal(evidencia.pauses.length, 1);
-  assert.equal(evidencia.elongations.length, 1);
-  assert.equal(evidencia.elongations[0].word, 'is');
-  assert.equal(evidencia.elongations[0].duration, 1.3);
-  assert.equal(evidencia.elongations[0].phoneme, 'z');
-  assert.equal(evidencia.elongations[0].source, 'azure-phoneme-duration');
+  assert.equal(evidencia.elongations.length, 0);
 });
 
 test('no confunde una pausa pegada al timestamp con un alargamiento', () => {
@@ -334,30 +323,6 @@ test('no confunde una pausa pegada al timestamp con un alargamiento', () => {
   assert.equal(evidencia.pauses.length, 1);
   assert.equal(evidencia.elongations.length, 0);
   assert.match(evidencia.annotatedTranscript, /\.\.\.\.\.\./);
-});
-
-test('alarga el grafema asociado al fonema real y no una letra silenciosa', () => {
-  const evidencia = crearEvidenciaHabla({
-    duracionSegundos: 1.4,
-    palabras: [{ word: 'name', start: 0, end: 1.3 }],
-    silencios: [],
-    pronunciacion: {
-      words: [
-        {
-          word: 'name',
-          phonemes: [
-            { phoneme: 'n', start: 0, duration: 0.1 },
-            { phoneme: 'eɪ', start: 0.1, duration: 1 },
-            { phoneme: 'm', start: 1.1, duration: 0.2 },
-          ],
-        },
-      ],
-    },
-  });
-
-  assert.match(evidencia.annotatedTranscript, /^name·{5}$/);
-  assert.doesNotMatch(evidencia.annotatedTranscript, /[a-z]{2,}$/);
-  assert.equal(evidencia.elongations[0].phoneme, 'eɪ');
 });
 
 test('elimina el archivo temporal aunque Groq responda con error', async () => {
@@ -409,240 +374,4 @@ test('convierte OPUS antes de enviarlo a Groq y limpia ambos archivos', async ()
   assert.equal(response.body.transcription, 'Audio OPUS transcrito.');
   await assert.rejects(access(rutaOriginal));
   await assert.rejects(access(rutaConvertida));
-});
-
-test('rota a la clave secundaria de Azure ante un error de autenticación', async () => {
-  let rutaWav;
-  let configuracionPronunciacion;
-  const clavesRecibidas = [];
-  const convertirAzure = async (ruta) => {
-    rutaWav = `${ruta}.wav`;
-    await copyFile(ruta, rutaWav);
-    return rutaWav;
-  };
-  const groqClient = clienteGroqFalso(async (opciones) => {
-    opciones.file.destroy();
-    return {
-      text: 'Good morning.',
-      language: 'English',
-      duration: 2,
-      words: [
-        { word: 'Good', start: 0, end: 0.5 },
-        { word: 'morning.', start: 0.5, end: 1.2 },
-      ],
-      segments: [],
-    };
-  });
-  const azureFetch = async (_url, opciones) => {
-    clavesRecibidas.push(opciones.headers['Ocp-Apim-Subscription-Key']);
-    configuracionPronunciacion = JSON.parse(
-      Buffer.from(
-        opciones.headers['Pronunciation-Assessment'],
-        'base64',
-      ).toString('utf8'),
-    );
-    if (clavesRecibidas.length === 1) {
-      return new Response('{}', { status: 401 });
-    }
-    return Response.json({
-      RecognitionStatus: 'Success',
-      NBest: [
-        {
-          PronScore: 88.4,
-          AccuracyScore: 86.2,
-          FluencyScore: 80.5,
-          CompletenessScore: 100,
-          ProsodyScore: 79.1,
-          Words: [
-            {
-              Word: 'morning',
-              Offset: 5000000,
-              Duration: 7000000,
-              PronunciationAssessment: {
-                AccuracyScore: 72.3,
-                ErrorType: 'Mispronunciation',
-              },
-              Phonemes: [
-                {
-                  Phoneme: 'ɔː',
-                  Offset: 8000000,
-                  Duration: 4000000,
-                  PronunciationAssessment: { AccuracyScore: 61.2 },
-                },
-              ],
-            },
-          ],
-        },
-      ],
-    });
-  };
-
-  const response = await request(
-    createApp({
-      groqClient,
-      convertirAzure,
-      azureFetch,
-      azureConfig: {
-        clavePrimaria: 'clave-primaria-prueba',
-        claveSecundaria: 'clave-secundaria-prueba',
-        region: 'southcentralus',
-        endpoint:
-          'https://gordon-speech-pronunciation.cognitiveservices.azure.com/',
-      },
-    }),
-  )
-    .post('/api/transcriptions')
-    .field('language', 'en')
-    .attach('audio', Buffer.from('audio simulado'), {
-      filename: 'grabacion.wav',
-      contentType: 'audio/wav',
-    })
-    .expect(200);
-
-  assert.deepEqual(clavesRecibidas, [
-    'clave-primaria-prueba',
-    'clave-secundaria-prueba',
-  ]);
-  assert.equal(configuracionPronunciacion.PhonemeAlphabet, 'IPA');
-  assert.deepEqual(response.body.pronunciation, {
-    provider: 'azure-speech',
-    pronunciationScore: 88.4,
-    accuracyScore: 86.2,
-    fluencyScore: 80.5,
-    completenessScore: 100,
-    prosodyScore: 79.1,
-    words: [
-      {
-        word: 'morning',
-        accuracyScore: 72.3,
-        errorType: 'Mispronunciation',
-        start: 0.5,
-        duration: 0.7,
-        phonemes: [
-          {
-            phoneme: 'ɔː',
-            accuracyScore: 61.2,
-            start: 0.8,
-            duration: 0.4,
-          },
-        ],
-      },
-    ],
-  });
-  assert.equal(response.body.pronunciationError, null);
-  assert.doesNotMatch(
-    JSON.stringify(response.body),
-    /clave-(primaria|secundaria)-prueba/,
-  );
-  await assert.rejects(access(rutaWav));
-});
-
-test('detecta español sin forzar inglés y evalúa con el locale es-MX', async () => {
-  let opcionesGroq;
-  let endpointAzure;
-  const convertirAzure = async (ruta) => {
-    const rutaWav = `${ruta}.wav`;
-    await copyFile(ruta, rutaWav);
-    return rutaWav;
-  };
-  const groqClient = clienteGroqFalso(async (opciones) => {
-    opcionesGroq = opciones;
-    opciones.file.destroy();
-    return {
-      text: 'Buenos días, quiero explicar mi proyecto.',
-      language: 'Spanish',
-      duration: 3,
-      words: [
-        { word: 'Buenos', start: 0, end: 0.5 },
-        { word: 'días,', start: 0.5, end: 0.9 },
-      ],
-      segments: [],
-    };
-  });
-  const azureFetch = async (url) => {
-    endpointAzure = url;
-    return Response.json({
-      RecognitionStatus: 'Success',
-      NBest: [
-        {
-          PronScore: 91,
-          AccuracyScore: 92,
-          FluencyScore: 89,
-          Words: [],
-        },
-      ],
-    });
-  };
-
-  const response = await request(
-    createApp({
-      groqClient,
-      convertirAzure,
-      azureFetch,
-      azureConfig: {
-        clavePrimaria: 'primaria',
-        region: 'southcentralus',
-      },
-    }),
-  )
-    .post('/api/transcriptions')
-    .attach('audio', Buffer.from('audio simulado'), {
-      filename: 'grabacion.wav',
-      contentType: 'audio/wav',
-    })
-    .expect(200);
-
-  assert.equal(opcionesGroq.language, undefined);
-  assert.equal(endpointAzure.searchParams.get('language'), 'es-MX');
-  assert.equal(response.body.language, 'Spanish');
-  assert.equal(
-    response.body.transcription,
-    'Buenos días, quiero explicar mi proyecto.',
-  );
-  assert.equal(response.body.pronunciation.pronunciationScore, 91);
-});
-
-test('no rota claves de Azure ante errores ajenos a autenticación', async () => {
-  let llamadasAzure = 0;
-  const convertirAzure = async (ruta) => {
-    const rutaWav = `${ruta}.wav`;
-    await copyFile(ruta, rutaWav);
-    return rutaWav;
-  };
-  const groqClient = clienteGroqFalso(async (opciones) => {
-    opciones.file.destroy();
-    return {
-      text: 'Good morning.',
-      duration: 2,
-      words: [],
-      segments: [],
-    };
-  });
-
-  const response = await request(
-    createApp({
-      groqClient,
-      convertirAzure,
-      azureFetch: async () => {
-        llamadasAzure++;
-        return new Response('{}', { status: 500 });
-      },
-      azureConfig: {
-        clavePrimaria: 'primaria',
-        claveSecundaria: 'secundaria',
-        region: 'southcentralus',
-      },
-    }),
-  )
-    .post('/api/transcriptions')
-    .field('language', 'en')
-    .attach('audio', Buffer.from('audio simulado'), {
-      filename: 'grabacion.wav',
-      contentType: 'audio/wav',
-    })
-    .expect(200);
-
-  assert.equal(llamadasAzure, 1);
-  assert.equal(response.body.pronunciation, null);
-  assert.equal(response.body.pronunciationError.code, 'ERROR_AZURE');
 });

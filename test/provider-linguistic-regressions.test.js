@@ -3,12 +3,10 @@ import test from 'node:test';
 
 import {
   extractLinguisticEvidence,
+  judgePronunciationFromPhonetics,
+  resetLinguisticGovernorForTests,
   runDoubleLinguisticJudging,
 } from '../src/evaluation/linguistic.js';
-import {
-  createContinuousPronunciationConfig,
-  evaluateAzureV2,
-} from '../src/evaluation/providers.js';
 
 function structuredClient(responses) {
   const pending = [...responses];
@@ -16,8 +14,8 @@ function structuredClient(responses) {
   return {
     chat: {
       completions: {
-        async create(options) {
-          calls.push(options);
+        async create(options, requestOptions) {
+          calls.push({ ...options, requestOptions });
           const content = pending.shift();
           assert.ok(content, 'La prueba no configuró una respuesta del modelo.');
           return {
@@ -86,245 +84,54 @@ function judgeResponse({ invalidCitations = false } = {}) {
   };
 }
 
-test('configura prosodia de Azure como propiedad booleana', async () => {
-  const module = await import('microsoft-cognitiveservices-speech-sdk');
-  const sdk = module.default ?? module;
-
-  const enUs = createContinuousPronunciationConfig(sdk, 'en-US');
-  const enUsJson = JSON.parse(enUs.toJSON());
-  assert.equal(enUsJson.enableProsodyAssessment, true);
-  assert.equal(enUsJson.phonemeAlphabet, 'IPA');
-  assert.equal(enUsJson.nbestPhonemeCount, 5);
-
-  const otherLocale = createContinuousPronunciationConfig(sdk, 'es-MX');
-  assert.equal(
-    JSON.parse(otherLocale.toJSON()).enableProsodyAssessment,
-    false,
-  );
-
-  const reading = createContinuousPronunciationConfig(
-    sdk,
-    'en-US',
-    'Read this canonical text.',
-  );
-  assert.equal(
-    JSON.parse(reading.toJSON()).referenceText,
-    'Read this canonical text.',
-  );
-});
-
-test('usa una sola toma para audios de hasta 30 segundos', async () => {
-  let restOptions;
-  let continuousCalls = 0;
-  const result = await evaluateAzureV2({
-    normalizedPath: '/tmp/short.wav',
-    durationSeconds: 30,
-    rubric: {
-      spec: {
-        mode: 'spontaneous',
-        targetLocale: 'en-US',
-        referenceText: '',
-      },
-    },
-    whisper: { words: [] },
-    quality: {},
-    azureConfig: {
-      clavePrimaria: 'primary',
-      region: 'test-region',
-    },
-    evaluateRest: async (options) => {
-      restOptions = options;
-      return {
-        provider: 'azure-speech',
-        pronunciationScore: 82.5,
-        accuracyScore: 84.25,
-        fluencyScore: 79.75,
-        completenessScore: 99,
-        prosodyScore: 78.5,
-        words: [],
-      };
-    },
-    evaluateContinuous: async () => {
-      continuousCalls++;
-      return [];
-    },
-  });
-
-  assert.equal(continuousCalls, 0);
-  assert.equal(restOptions.rutaWav, '/tmp/short.wav');
-  assert.equal(restOptions.textoReferencia, '');
-  assert.equal(restOptions.mode, 'spontaneous');
-  assert.equal(result.recognitionMode, 'single-shot');
-  assert.equal(result.recognitionThresholdSeconds, 30);
-  assert.equal(result.completenessScore, null);
-});
-
-test('rota a modo continuo después de 30 segundos y reconstruye omisiones e inserciones de lectura', async () => {
-  let restCalls = 0;
-  let continuousOptions;
-  const referenceText = 'alpha beta gamma delta epsilon';
-  const spokenWords = ['alpha', 'gamma', 'zeta', 'delta', 'epsilon', 'extra'];
-  const result = await evaluateAzureV2({
-    normalizedPath: '/tmp/long.wav',
-    durationSeconds: 30.1,
-    rubric: {
-      spec: {
-        mode: 'reading',
-        targetLocale: 'en-US',
-        referenceText,
-      },
-    },
-    whisper: { words: [] },
-    quality: {},
-    azureConfig: {
-      clavePrimaria: 'primary',
-      region: 'test-region',
-    },
-    evaluateRest: async () => {
-      restCalls++;
-      throw new Error('REST no debe usarse para audio largo.');
-    },
-    evaluateContinuous: async (options) => {
-      continuousOptions = options;
-      return [
+test('juzga IPA con inteligibilidad y contexto de lengua materna', async () => {
+  const client = structuredClient([
+    {
+      status: 'scored',
+      band: 3,
+      expectedIpa: 'dʒəˈpæn ɹuːt',
+      rationale:
+        'La realización conserva suficiente inteligibilidad aunque refleja transferencia del español.',
+      observations: [
         {
-          RecognitionStatus: 'Success',
-          Offset: 0,
-          Duration: 301000000,
-          DisplayText: spokenWords.join(' '),
-          NBest: [
-            {
-              Lexical: spokenWords.join(' '),
-              Display: spokenWords.join(' '),
-              PronunciationAssessment: {
-                PronScore: 81,
-                AccuracyScore: 82,
-                FluencyScore: 78,
-                CompletenessScore: 100,
-                ProsodyScore: 76,
-              },
-              Words: spokenWords.map((word, index) => ({
-                Word: word,
-                Offset: index * 40000000,
-                Duration: 30000000,
-                PronunciationAssessment: {
-                  AccuracyScore: 82,
-                  ErrorType: 'None',
-                },
-              })),
-            },
-          ],
+          expected: 'dʒəˈpæn',
+          observed: 'ðæpən',
+          explanation:
+            'Hay sustitución consonántica, pero la palabra permanece reconocible en contexto.',
+          affectsIntelligibility: false,
         },
-      ];
+      ],
     },
-  });
+  ]);
 
-  assert.equal(restCalls, 0);
-  assert.equal(continuousOptions.referenceText, referenceText);
-  assert.equal(continuousOptions.locale, 'en-US');
-  assert.equal(result.recognitionMode, 'continuous');
-  assert.equal(result.aggregation.reconstructedMiscues, true);
-  assert.equal(result.aggregation.omissionCount, 1);
-  assert.equal(result.aggregation.insertionCount, 2);
-  assert.equal(result.completenessScore, 80);
-  assert.equal(
-    result.words.find((word) => word.errorType === 'Omission')?.word,
-    'beta',
-  );
-  assert.deepEqual(
-    result.words
-      .filter((word) => word.errorType === 'Insertion')
-      .map((word) => word.word),
-    ['zeta', 'extra'],
-  );
-});
-
-test('si Azure continuo falla segmenta una respuesta espontánea en tomas menores de 30 segundos', async () => {
-  const restPaths = [];
-  let cleaned = false;
-  let splitOptions;
-  const result = await evaluateAzureV2({
-    normalizedPath: '/tmp/long-spontaneous.wav',
-    durationSeconds: 65,
+  const result = await judgePronunciationFromPhonetics({
+    client,
+    model: 'test-model',
     rubric: {
       spec: {
         mode: 'spontaneous',
         targetLocale: 'en-US',
-        referenceText: '',
+        cefr: 'B1',
+        nativeLanguage: 'es',
       },
     },
-    whisper: { words: [] },
-    quality: {
-      activity: {
-        silenceIntervals: [{ start: 24.5, end: 25 }],
-      },
-    },
-    azureConfig: {
-      clavePrimaria: 'primary',
-      region: 'test-region',
-    },
-    evaluateContinuous: async () => {
-      const error = new Error('Azure canceló la sesión.');
-      error.code = 'AZURE_CONTINUOUS_ERROR';
-      throw error;
-    },
-    splitAudio: async (_path, options) => {
-      splitOptions = options;
-      return [
-        { path: '/tmp/chunk-1.wav', start: 0, end: 25, owned: true },
-        { path: '/tmp/chunk-2.wav', start: 25, end: 50, owned: true },
-        { path: '/tmp/chunk-3.wav', start: 50, end: 65, owned: true },
-      ];
-    },
-    cleanChunks: async () => {
-      cleaned = true;
-    },
-    evaluateRest: async ({ rutaWav }) => {
-      restPaths.push(rutaWav);
-      const index = restPaths.length;
-      return {
-        provider: 'azure-speech',
-        recognitionStatus: 'Success',
-        displayText: `chunk ${index}`,
-        lexicalText: `chunk ${index}`,
-        pronunciationScore: 80,
-        accuracyScore: 80,
-        fluencyScore: 75,
-        completenessScore: null,
-        prosodyScore: 70,
-        words: [
-          {
-            word: `word-${index}`,
-            start: 1,
-            duration: 0.5,
-            accuracyScore: 80,
-            errorType: 'None',
-            phonemes: [],
-            syllables: [],
-          },
-        ],
-        rawResponse: { index },
-      };
+    transcript: 'Japan route.',
+    phoneticEvidence: {
+      transcript: 'ðæpən ɹoʊt',
+      model: 'wav2vec2-phoneme-en',
+      confidence: 0.702,
     },
   });
 
-  assert.deepEqual(restPaths, [
-    '/tmp/chunk-1.wav',
-    '/tmp/chunk-2.wav',
-    '/tmp/chunk-3.wav',
-  ]);
-  assert.equal(splitOptions.chunkSeconds, 25);
-  assert.equal(splitOptions.overlapSeconds, 0);
-  assert.equal(cleaned, true);
-  assert.equal(result.recognitionMode, 'segmented-single-shot-fallback');
-  assert.equal(result.fallback.reasonCode, 'AZURE_CONTINUOUS_ERROR');
-  assert.equal(result.fallback.chunkCount, 3);
-  assert.deepEqual(
-    result.words.map((word) => word.start),
-    [1, 26, 51],
-  );
-  assert.equal(result.accuracyScore, 80);
-  assert.equal(result.fluencyScore, 75);
+  assert.equal(result.status, 'scored');
+  assert.equal(result.band, 3);
+  const systemPrompt = client.calls[0].messages[0].content;
+  assert.match(systemPrompt, /no exijas acento nativo/i);
+  const payload = JSON.parse(client.calls[0].messages[1].content).data;
+  assert.equal(payload.nativeLanguage, 'español');
+  assert.equal(payload.observedIpa, 'ðæpən ɹoʊt');
+  assert.equal(payload.orthographicTranscript, 'Japan route.');
+  assert.equal(client.pendingResponses, 0);
 });
 
 test('una muestra de 24.8 s con voz y palabras suficientes llega al extractor', async () => {
@@ -394,7 +201,8 @@ test('una muestra de 24.8 s con voz y palabras suficientes llega al extractor', 
   assert.ok(evidence.sufficiency.lexicalCount >= 30);
   assert.ok(evidence.sufficiency.voicedSeconds >= 15);
   assert.equal(client.pendingResponses, 0);
-  assert.equal(client.calls[0].max_completion_tokens, 3200);
+  assert.equal(client.calls[0].max_completion_tokens, 1800);
+  assert.equal(client.calls[0].requestOptions.maxRetries, 0);
 });
 
 test('respeta retry-after de Groq y recupera el extractor tras un 429', async () => {
@@ -472,6 +280,383 @@ test('respeta retry-after de Groq y recupera el extractor tras un 429', async ()
   assert.equal(attempts, 2);
   assert.equal(evidence.sufficientEvidence, true);
   assert.equal(evidence.findings.length, 3);
+});
+
+test('compacta una muestra larga antes de enviarla al extractor', async () => {
+  const client = structuredClient([
+    {
+      sufficientEvidence: true,
+      taskCoverage: 0.85,
+      summary: 'La muestra contiene evidencia suficiente.',
+      findings: [
+        {
+          id: 'communication-long',
+          dimension: 'communication',
+          type: 'coverage',
+          claim: 'La respuesta presenta una experiencia pasada.',
+          tokenStart: 0,
+          tokenEnd: 3,
+          quote: 'Last year I planned',
+          correction: '',
+          certainty: 0.95,
+        },
+        {
+          id: 'grammar-long',
+          dimension: 'grammar',
+          type: 'strength',
+          claim: 'La respuesta usa pasado simple.',
+          tokenStart: 4,
+          tokenEnd: 7,
+          quote: 'a long trip through',
+          correction: '',
+          certainty: 0.9,
+        },
+        {
+          id: 'vocabulary-long',
+          dimension: 'vocabulary',
+          type: 'strength',
+          claim: 'La respuesta usa vocabulario de viajes.',
+          tokenStart: 8,
+          tokenEnd: 11,
+          quote: 'Japan with two friends',
+          correction: '',
+          certainty: 0.9,
+        },
+      ],
+    },
+  ]);
+  const paragraph =
+    'Last year I planned a long trip through Japan with two friends from university. ' +
+    'First we traveled from Tokyo to Kyoto by train because it was faster and more comfortable than taking a bus. ' +
+    'I reserved a hotel near the station but booked the wrong dates so a local teacher helped us find a guest house. ';
+  const transcript = `${paragraph}${paragraph}${paragraph}`;
+  const secondaryTranscript = transcript.replaceAll('train', 'plane');
+
+  await extractLinguisticEvidence({
+    client,
+    model: 'test-model',
+    rubric: {
+      spec: {
+        mode: 'spontaneous',
+        targetLocale: 'en-US',
+        cefr: 'B2',
+        instruction:
+          'Describe a past trip, compare transportation, and explain each decision.',
+        communicativePurpose: 'Narrate and explain',
+        targetConcepts: ['sequence', 'comparison', 'justification'],
+        vocabularyHints: ['train', 'hotel', 'route'],
+      },
+      dimensions: [
+        {
+          id: 'communication',
+          descriptor: 'Transmite una narración coherente.',
+          constructScope: 'productive_speaking',
+          bands: Array.from({ length: 5 }, (_value, band) => ({
+            band,
+            label: `Band ${band}`,
+          })),
+        },
+        {
+          id: 'grammar',
+          descriptor: 'Usa estructuras del nivel.',
+          constructScope: 'productive_speaking',
+          bands: [],
+        },
+        {
+          id: 'vocabulary',
+          descriptor: 'Usa léxico adecuado.',
+          constructScope: 'productive_speaking',
+          bands: [],
+        },
+      ],
+      scoreProfile: { weights: { communication: 1 } },
+      limitations: ['No debe enviarse al modelo en esta etapa.'],
+    },
+    transcript,
+    secondaryTranscript,
+    quality: {
+      status: 'accepted',
+      warnings: [],
+      metrics: {
+        durationSeconds: 103,
+        voicedSeconds: 60,
+        speechRatio: 0.58,
+        snrDb: 25,
+        clippingRatio: 0,
+      },
+      signature: { originalSha256: 'not-needed-by-the-model' },
+    },
+    providerDisagreement: 0.08,
+  });
+
+  const request = JSON.parse(client.calls[0].messages[1].content);
+  assert.ok(request.data.tokens.every((token) => typeof token === 'string'));
+  assert.equal('secondaryTranscript' in request.data, false);
+  assert.equal('scoreProfile' in request.data.rubric, false);
+  assert.equal('signature' in request.data.audioQuality, false);
+  assert.equal(request.data.rubric.dimensions[0].bands.length, 5);
+  assert.equal(
+    request.data.rubric.dimensions[0].bands[3].label,
+    'Band 3',
+  );
+  assert.ok(
+    Array.isArray(request.data.asrComparison.uncertainPrimaryTokenIndices),
+  );
+  assert.ok(client.calls[0].messages[1].content.length < 16_000);
+  assert.equal(client.calls[0].max_completion_tokens, 1800);
+});
+
+test('conserva la extracción válida si falla una reparación complementaria', async () => {
+  let attempts = 0;
+  const client = {
+    chat: {
+      completions: {
+        async create() {
+          attempts++;
+          if (attempts === 1) {
+            return {
+              choices: [
+                {
+                  message: {
+                    content: JSON.stringify({
+                      sufficientEvidence: true,
+                      taskCoverage: 0.7,
+                      summary: 'Hay evidencia comunicativa válida.',
+                      findings: [
+                        {
+                          id: 'communication-valid',
+                          dimension: 'communication',
+                          type: 'coverage',
+                          claim: 'La respuesta explica una decisión.',
+                          tokenStart: 0,
+                          tokenEnd: 3,
+                          quote: 'I explained my decision',
+                          correction: '',
+                          certainty: 0.9,
+                        },
+                      ],
+                    }),
+                  },
+                },
+              ],
+            };
+          }
+          const error = new Error('Request too large.');
+          error.status = 413;
+          throw error;
+        },
+      },
+    },
+  };
+
+  const evidence = await extractLinguisticEvidence({
+    client,
+    model: 'test-model',
+    rubric: { spec: { mode: 'spontaneous' } },
+    transcript:
+      'I explained my decision and described the complete journey with several details about routes tickets stations hotels schedules prices safety comfort and transportation.',
+    secondaryTranscript: '',
+    quality: { metrics: { durationSeconds: 20, voicedSeconds: 16 } },
+    providerDisagreement: null,
+  });
+
+  assert.equal(attempts, 2);
+  assert.equal(evidence.findings.length, 1);
+  assert.equal(evidence.extractorRepairAttempted, true);
+  assert.equal(evidence.extractorRepaired, false);
+  assert.equal(
+    evidence.extractorRepairError?.code,
+    'LINGUISTIC_REQUEST_TOO_LARGE',
+  );
+});
+
+test('serializa las llamadas lingüísticas concurrentes por instancia', async () => {
+  const previousLimit = process.env.GROQ_LINGUISTIC_TPM_LIMIT;
+  process.env.GROQ_LINGUISTIC_TPM_LIMIT = '50000';
+  resetLinguisticGovernorForTests();
+  let inFlight = 0;
+  let maximumInFlight = 0;
+  const response = {
+    sufficientEvidence: true,
+    taskCoverage: 0.8,
+    summary: 'La muestra contiene evidencia suficiente.',
+    findings: [
+      {
+        id: 'communication-queue',
+        dimension: 'communication',
+        type: 'coverage',
+        claim: 'La respuesta desarrolla la tarea.',
+        tokenStart: 0,
+        tokenEnd: 2,
+        quote: 'I described it',
+        correction: '',
+        certainty: 0.9,
+      },
+      {
+        id: 'grammar-queue',
+        dimension: 'grammar',
+        type: 'strength',
+        claim: 'La respuesta usa una estructura verbal.',
+        tokenStart: 3,
+        tokenEnd: 5,
+        quote: 'and explained why',
+        correction: '',
+        certainty: 0.9,
+      },
+      {
+        id: 'vocabulary-queue',
+        dimension: 'vocabulary',
+        type: 'strength',
+        claim: 'La respuesta usa vocabulario pertinente.',
+        tokenStart: 6,
+        tokenEnd: 8,
+        quote: 'the trip mattered',
+        correction: '',
+        certainty: 0.9,
+      },
+    ],
+  };
+  const client = {
+    chat: {
+      completions: {
+        async create() {
+          inFlight++;
+          maximumInFlight = Math.max(maximumInFlight, inFlight);
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          inFlight--;
+          return {
+            choices: [
+              { message: { content: JSON.stringify(response) } },
+            ],
+          };
+        },
+      },
+    },
+  };
+  const input = {
+    client,
+    model: 'openai/gpt-oss-20b',
+    rubric: { spec: { mode: 'spontaneous' } },
+    transcript:
+      'I described it and explained why the trip mattered to my family.',
+    secondaryTranscript: '',
+    quality: { metrics: { durationSeconds: 20, voicedSeconds: 16 } },
+    providerDisagreement: null,
+  };
+
+  try {
+    await Promise.all([
+      extractLinguisticEvidence(input),
+      extractLinguisticEvidence(input),
+    ]);
+    assert.equal(maximumInFlight, 1);
+  } finally {
+    resetLinguisticGovernorForTests();
+    if (previousLimit === undefined) {
+      delete process.env.GROQ_LINGUISTIC_TPM_LIMIT;
+    } else {
+      process.env.GROQ_LINGUISTIC_TPM_LIMIT = previousLimit;
+    }
+  }
+});
+
+test('rechaza localmente una etapa que no cabe en el presupuesto TPM', async () => {
+  const previousLimit = process.env.GROQ_LINGUISTIC_TPM_LIMIT;
+  process.env.GROQ_LINGUISTIC_TPM_LIMIT = '500';
+  resetLinguisticGovernorForTests();
+  let attempts = 0;
+  const client = {
+    chat: {
+      completions: {
+        async create() {
+          attempts++;
+          throw new Error('No debe contactar al proveedor.');
+        },
+      },
+    },
+  };
+
+  try {
+    await assert.rejects(
+      extractLinguisticEvidence({
+        client,
+        model: 'openai/gpt-oss-20b',
+        rubric: { spec: { mode: 'spontaneous' } },
+        transcript:
+          'I described a complete journey with routes tickets stations hotels schedules prices safety comfort transportation plans and several detailed reasons for each decision.',
+        secondaryTranscript: '',
+        quality: { metrics: { durationSeconds: 20, voicedSeconds: 16 } },
+        providerDisagreement: null,
+      }),
+      (error) => {
+        assert.equal(
+          error.code,
+          'LINGUISTIC_LOCAL_TOKEN_BUDGET_EXCEEDED',
+        );
+        assert.ok(error.details.estimatedRequestTokens > 500);
+        return true;
+      },
+    );
+    assert.equal(attempts, 0);
+  } finally {
+    resetLinguisticGovernorForTests();
+    if (previousLimit === undefined) {
+      delete process.env.GROQ_LINGUISTIC_TPM_LIMIT;
+    } else {
+      process.env.GROQ_LINGUISTIC_TPM_LIMIT = previousLimit;
+    }
+  }
+});
+
+test('conserva dimensiones acordadas si falla la adjudicación', async () => {
+  let attempts = 0;
+  const analytic = judgeResponse();
+  const holistic = judgeResponse();
+  holistic.dimensions[0].band = 2;
+  const client = {
+    chat: {
+      completions: {
+        async create() {
+          attempts++;
+          if (attempts <= 2) {
+            const content = attempts === 1 ? analytic : holistic;
+            return {
+              choices: [
+                { message: { content: JSON.stringify(content) } },
+              ],
+            };
+          }
+          const error = new Error('Request too large.');
+          error.status = 413;
+          throw error;
+        },
+      },
+    },
+  };
+
+  const result = await runDoubleLinguisticJudging({
+    client,
+    model: 'test-model',
+    rubric: {
+      spec: { mode: 'spontaneous' },
+      dimensions: [],
+    },
+    evidence: {
+      sufficientEvidence: true,
+      summary: 'Hay evidencia.',
+      findings: linguisticFindings(),
+    },
+  });
+
+  assert.equal(result.dimensions.communication.status, 'insufficientEvidence');
+  assert.equal(
+    result.dimensions.communication.reasonCode,
+    'LINGUISTIC_REQUEST_TOO_LARGE',
+  );
+  assert.equal(result.dimensions.grammar.status, 'scored');
+  assert.equal(result.dimensions.vocabulary.status, 'scored');
+  assert.equal(result.adjudicated, false);
+  assert.equal(result.adjudicationAttempted, true);
 });
 
 test('una muestra espontánea pasa con 15 s de voz aunque tenga menos de 30 palabras', async () => {

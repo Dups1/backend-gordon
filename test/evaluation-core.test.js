@@ -24,7 +24,6 @@ import {
   verifyRubricToken,
 } from '../src/evaluation/domain.js';
 import { runAssessment } from '../src/evaluation/engine.js';
-import { normalizeAzureResponse } from '../src/evaluation/providers.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -128,6 +127,30 @@ test('lectura exige texto canónico y conserva el alcance de realización', () =
   );
 });
 
+test('conserva la lengua materna como contexto sin cambiar el idioma objetivo', () => {
+  const draft = createRubricDraft({
+    mode: 'spontaneous',
+    targetLocale: 'en-US',
+    cefr: 'B1',
+    nativeLanguage: 'es',
+    instruction: 'Describe a memorable trip.',
+  });
+
+  assert.equal(draft.spec.nativeLanguage, 'es');
+  assert.equal(draft.spec.targetLocale, 'en-US');
+  assert.throws(
+    () =>
+      createRubricDraft({
+        mode: 'spontaneous',
+        targetLocale: 'en-US',
+        cefr: 'B1',
+        nativeLanguage: 'invalid-language',
+        instruction: 'Describe a memorable trip.',
+      }),
+    /lengua materna/i,
+  );
+});
+
 test('no limita valores inválidos ni redistribuye pesos faltantes', () => {
   const invalid = dimensionResult({
     id: 'pronunciation',
@@ -173,36 +196,6 @@ test('no limita valores inválidos ni redistribuye pesos faltantes', () => {
   );
   assert.equal(overall.score, null);
   assert.deepEqual(overall.missingDimensions, ['fluency']);
-});
-
-test('rechaza valores inválidos de Azure en vez de limitarlos', () => {
-  assert.throws(
-    () =>
-      normalizeAzureResponse(
-        {
-          RecognitionStatus: 'Success',
-          NBest: [
-            {
-              Display: 'Hello.',
-              PronunciationAssessment: {
-                PronScore: 130,
-                AccuracyScore: 80,
-                FluencyScore: 75,
-                ProsodyScore: 70,
-              },
-            },
-          ],
-        },
-        {
-          mode: 'spontaneous',
-          locale: 'en-US',
-          requestId: 'invalid-provider-score',
-        },
-      ),
-    (error) =>
-      error.code === 'INVALID_PROVIDER_SCORE' &&
-      error.details?.field === 'pronunciationScore',
-  );
 });
 
 test('el quality gate distingue silencio de voz y conserva decimales', async () => {
@@ -318,6 +311,7 @@ test('normaliza MP3, Opus, WebM, M4A y FLAC por su firma real', async () => {
 test('expone el flujo v2 síncrono con confirmación previa y audio real', async () => {
   const secret = 'rubric-secret-test';
   const logs = [];
+  let evaluationInput;
   const storage = {
     configured: false,
     async saveAssessment() {
@@ -355,7 +349,10 @@ test('expone el flujo v2 síncrono con confirmación previa y audio real', async
         metrics: { durationSeconds: 12, voicedSeconds: 11 },
       },
     }),
-    ejecutarEvaluacion: async ({ rubric, requestId }) => ({
+    ejecutarEvaluacion: async (input) => {
+      evaluationInput = input;
+      const { rubric, requestId } = input;
+      return {
       schemaVersion: '2.0.0',
       requestId,
       assessmentId: '11111111-1111-4111-8111-111111111111',
@@ -379,12 +376,13 @@ test('expone el flujo v2 síncrono con confirmación previa y audio real', async
         },
       },
       provenance: {
-        promptVersion: 'gordon-evidence-v1.1',
-        providers: { azure: { recognitionMode: 'single-shot' } },
+        promptVersion: 'gordon-evidence-v1.2',
+        providers: { whisper: { provider: 'groq' } },
       },
       consentStorage: { requested: false, stored: false },
       providerEvidence: {},
-    }),
+      };
+    },
   });
 
   const draftResponse = await request(app)
@@ -393,6 +391,7 @@ test('expone el flujo v2 síncrono con confirmación previa y audio real', async
       mode: 'spontaneous',
       targetLocale: 'en-US',
       cefr: 'B1',
+      nativeLanguage: 'es',
       instruction: 'Explain a learning experience.',
     })
     .expect(201);
@@ -406,6 +405,9 @@ test('expone el flujo v2 síncrono con confirmación previa y audio real', async
   const assessment = await request(app)
     .post('/api/v2/assessments')
     .field('confirmedRubricToken', confirmation.body.confirmedRubricToken)
+    .field('phoneticTranscript', 'ðæpən ɹoʊt')
+    .field('phoneticConfidence', '0.702')
+    .field('phoneticModel', 'wav2vec2-phoneme-en')
     .attach('audio', wavPcm16({ durationSeconds: 1 }), {
       filename: 'student.wav',
       contentType: 'audio/wav',
@@ -415,6 +417,12 @@ test('expone el flujo v2 síncrono con confirmación previa y audio real', async
   assert.equal(assessment.body.schemaVersion, '2.0.0');
   assert.equal(assessment.body.status, 'needsReview');
   assert.equal(assessment.body.consentStorage.stored, false);
+  assert.equal(evaluationInput.rubric.spec.nativeLanguage, 'es');
+  assert.deepEqual(evaluationInput.phoneticEvidence, {
+    transcript: 'ðæpən ɹoʊt',
+    confidence: 0.702,
+    model: 'wav2vec2-phoneme-en',
+  });
   const completionLog = logs.find(
     (entry) => entry.event === 'assessment_completed',
   );
@@ -481,90 +489,4 @@ test('el endpoint v2 nunca evalúa sin bytes de audio', async () => {
     .expect(({ body }) => {
       assert.equal(body.error.code, 'AUDIO_REQUIRED');
     });
-});
-
-test('si Whisper falla conserva Azure y se abstiene en lingüística', async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), 'gordon-whisper-down-'));
-  const audioPath = path.join(directory, 'voice.wav');
-  await writeFile(
-    audioPath,
-    wavPcm16({ durationSeconds: 32, amplitude: 0.25 }),
-  );
-  try {
-    const quality = await analyzeAudioQuality(audioPath);
-    const report = await runAssessment({
-      rubric: spontaneousDraft(),
-      originalAudio: audioPath,
-      normalizedAudio: audioPath,
-      signature: {
-        container: 'wav',
-        originalBytes: (await stat(audioPath)).size,
-        originalSha256: 'original-hash',
-      },
-      quality,
-      groqClient: {
-        audio: {
-          transcriptions: {
-            create: async () => {
-              const error = new Error('Whisper no disponible');
-              error.status = 400;
-              throw error;
-            },
-          },
-        },
-      },
-      linguisticModel: 'test-linguistic',
-      whisperModel: 'test-whisper',
-      azureConfig: {
-        clavePrimaria: 'test-key',
-        region: 'test-region',
-      },
-      evaluateAzureRest: async () => {
-        throw new Error('REST no debe usarse en modo espontáneo.');
-      },
-      evaluateAzureContinuous: async () => [
-        {
-          RecognitionStatus: 'Success',
-          Offset: 0,
-          Duration: 320000000,
-          DisplayText: 'I learned from practice.',
-          NBest: [
-            {
-              Lexical: 'i learned from practice',
-              Display: 'I learned from practice.',
-              PronunciationAssessment: {
-                PronScore: 81.25,
-                AccuracyScore: 82.5,
-                FluencyScore: 77.75,
-                ProsodyScore: 79.5,
-              },
-              Words: [
-                {
-                  Word: 'learned',
-                  Offset: 1000000,
-                  Duration: 5000000,
-                  PronunciationAssessment: {
-                    AccuracyScore: 82.5,
-                    ErrorType: 'None',
-                  },
-                },
-              ],
-            },
-          ],
-        },
-      ],
-      requestId: 'request-whisper-down',
-    });
-
-    assert.equal(report.status, 'partial');
-    assert.equal(report.transcript.primary.status, 'unavailable');
-    assert.equal(report.dimensions.pronunciation.status, 'scored');
-    assert.equal(report.dimensions.fluency.status, 'scored');
-    assert.equal(report.dimensions.communication.status, 'providerError');
-    assert.equal(report.dimensions.grammar.status, 'providerError');
-    assert.equal(report.dimensions.vocabulary.status, 'providerError');
-    assert.equal(report.overall.score, null);
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
 });

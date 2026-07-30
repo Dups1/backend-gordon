@@ -12,6 +12,7 @@ export async function withCircuitBreaker(
     failures: 0,
     openedAt: null,
   };
+  circuits.set(provider, state);
   if (
     state.openedAt !== null &&
     now - state.openedAt < coolDownMs
@@ -32,10 +33,13 @@ export async function withCircuitBreaker(
     circuits.set(provider, { failures: 0, openedAt: null });
     return result;
   } catch (error) {
+    const providerStatus = Number.isInteger(error?.details?.providerStatus)
+      ? error.details.providerStatus
+      : error?.status;
     const providerFailure =
-      !Number.isInteger(error?.status) ||
-      error.status >= 500 ||
-      error.status === 429;
+      !Number.isInteger(providerStatus) ||
+      providerStatus >= 500 ||
+      providerStatus === 408;
     if (providerFailure) {
       state.failures++;
       if (state.failures >= failureThreshold) state.openedAt = Date.now();
@@ -56,4 +60,3 @@ export function circuitSnapshot() {
     ]),
   );
 }
-
