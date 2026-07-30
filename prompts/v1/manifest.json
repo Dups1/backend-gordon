@@ -1,8 +1,9 @@
 {
-  "promptVersion": "gordon-evidence-v1.8",
+  "promptVersion": "gordon-evidence-v1.9",
   "files": {
     "securityEnvelope": "security-envelope.txt",
     "instructionImprover": "instruction-improver.txt",
+    "phoneticLiteralizer": "phonetic-literalizer.txt",
     "rubricCompiler": "rubric-compiler.txt",
     "evidenceExtractor": "evidence-extractor.txt",
     "analyticJudge": "analytic-judge.txt",

@@ -304,6 +304,27 @@ const instructionImprovementSchema = {
   ],
 };
 
+const phoneticLiteralizationSchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    segments: {
+      type: 'array',
+      maxItems: 512,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          id: { type: 'string' },
+          written: { type: 'string' },
+        },
+        required: ['id', 'written'],
+      },
+    },
+  },
+  required: ['segments'],
+};
+
 function structuredContentText(content) {
   if (typeof content === 'string') return content.trim();
   if (!Array.isArray(content)) return '';
@@ -907,6 +928,81 @@ export async function enhanceRubricDraftWithAI({
       model,
       promptVersion: PROMPT_VERSION,
     },
+  };
+}
+
+function literalPhoneticSegments(phoneticEvidence) {
+  const transcript =
+    typeof phoneticEvidence?.transcript === 'string'
+      ? phoneticEvidence.transcript.trim()
+      : '';
+  if (!transcript) return [];
+  return transcript
+    .split(/\s*·+\s*/u)
+    .map((ipa) => ipa.trim())
+    .filter(Boolean)
+    .slice(0, 512)
+    .map((ipa, index) => ({
+      id: `p${index}`,
+      ipa: ipa.slice(0, 240),
+    }));
+}
+
+export async function transcribePhonemesLiterally({
+  client,
+  model,
+  targetLocale,
+  phoneticEvidence,
+}) {
+  const sourceSegments = literalPhoneticSegments(phoneticEvidence);
+  if (!sourceSegments.length) return null;
+  const raw = await callStructured({
+    client,
+    model,
+    schema: phoneticLiteralizationSchema,
+    schemaName: 'gordon_literal_transcript_from_phonemes',
+    maxTokens: 4000,
+    system: INTERNAL_PROMPTS.phoneticLiteralizer,
+    payload: {
+      targetLocale,
+      acousticModel: phoneticEvidence.model ?? null,
+      segments: sourceSegments,
+    },
+  });
+  const validIds = new Set(sourceSegments.map((segment) => segment.id));
+  const renderedById = new Map(
+    (Array.isArray(raw?.segments) ? raw.segments : [])
+      .filter(
+        (segment) =>
+          validIds.has(segment?.id) &&
+          typeof segment?.written === 'string' &&
+          segment.written.trim(),
+      )
+      .map((segment) => [
+        segment.id,
+        segment.written.trim().replace(/\s+/g, ' ').slice(0, 240),
+      ]),
+  );
+  if (!renderedById.size) {
+    throw new EvaluationError(
+      502,
+      'El modelo no convirtió los fonemas en texto literal.',
+      'PHONETIC_LITERAL_TRANSCRIPT_INVALID',
+    );
+  }
+  const segments = sourceSegments.map((segment) => ({
+    ...segment,
+    written:
+      renderedById.get(segment.id) ?? `⟦/${segment.ipa}/⟧`,
+  }));
+  return {
+    text: segments.map((segment) => segment.written).join(' '),
+    segments,
+    methodId: 'deepseek-phoneme-literal-transcription-v1',
+    provider: 'opencode-zen',
+    model,
+    promptVersion: PROMPT_VERSION,
+    usesWhisperReference: false,
   };
 }
 

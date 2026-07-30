@@ -7,6 +7,7 @@ import {
   judgePronunciationFromPhonetics,
   resetLinguisticGovernorForTests,
   runDoubleLinguisticJudging,
+  transcribePhonemesLiterally,
 } from '../src/evaluation/linguistic.js';
 
 function structuredClient(responses) {
@@ -154,6 +155,48 @@ test('juzga IPA con inteligibilidad y contexto de lengua materna', async () => {
     ],
   );
   assert.equal(client.pendingResponses, 0);
+});
+
+test('convierte fonemas en texto literal sin recibir Whisper ni una frase esperada', async () => {
+  const client = structuredClient([
+    {
+      segments: [
+        { id: 'p0', written: 'thapen' },
+        { id: 'p1', written: 'rou' },
+      ],
+    },
+  ]);
+
+  const result = await transcribePhonemesLiterally({
+    client,
+    model: 'deepseek-v4-flash',
+    targetLocale: 'en-US',
+    phoneticEvidence: {
+      transcript: 'ðæpən  ·  ɹoʊ',
+      model: 'wav2vec2-phoneme-en',
+      confidence: 0.7,
+      events: [],
+    },
+  });
+
+  assert.equal(result.text, 'thapen rou');
+  assert.equal(result.usesWhisperReference, false);
+  assert.equal(
+    result.methodId,
+    'deepseek-phoneme-literal-transcription-v1',
+  );
+  const request = JSON.parse(client.calls[0].messages[1].content).data;
+  assert.deepEqual(request, {
+    targetLocale: 'en-US',
+    acousticModel: 'wav2vec2-phoneme-en',
+    segments: [
+      { id: 'p0', ipa: 'ðæpən' },
+      { id: 'p1', ipa: 'ɹoʊ' },
+    ],
+  });
+  assert.equal(JSON.stringify(request).includes('Whisper'), false);
+  assert.equal(JSON.stringify(request).includes('instruction'), false);
+  assert.match(client.calls[0].messages[0].content, /no corrijas/i);
 });
 
 test('usa JSON Object Mode y valida localmente el juez fonético', async () => {

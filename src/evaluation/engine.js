@@ -17,6 +17,7 @@ import {
   generatePedagogicalFeedback,
   judgePronunciationFromPhonetics,
   runDoubleLinguisticJudging,
+  transcribePhonemesLiterally,
 } from './linguistic.js';
 import {
   transcribeWhisper,
@@ -448,6 +449,9 @@ export async function runAssessment({
         pauses: { status: 'unavailable', items: null },
         elongations: { status: 'unavailable', items: null },
         annotatedTranscript: null,
+        annotatedTranscriptStatus: 'unavailable',
+        annotatedTranscriptMethod: null,
+        annotatedTranscriptError: null,
       },
       dimensions,
       overall: calculateOverall(dimensions, rubric.scoreProfile),
@@ -521,6 +525,9 @@ export async function runAssessment({
     pauses: { status: 'unavailable', items: null },
     elongations: { status: 'unavailable', items: null },
     annotatedTranscript: null,
+    annotatedTranscriptStatus: 'unavailable',
+    annotatedTranscriptMethod: null,
+    annotatedTranscriptError: null,
   };
   if (typeof analyzeSpeech === 'function' && whisperEvidence.words.length) {
     try {
@@ -539,13 +546,52 @@ export async function runAssessment({
           status: legacy ? 'complete' : 'unavailable',
           items: legacy?.elongations ?? null,
         },
-        annotatedTranscript: legacy?.annotatedTranscript ?? null,
+        annotatedTranscript: null,
+        annotatedTranscriptStatus: 'unavailable',
+        annotatedTranscriptMethod: null,
+        annotatedTranscriptError: null,
         method: legacy?.method ?? null,
       };
     } catch (error) {
       speechEvidence.error = {
         code: error?.code ?? 'SPEECH_EVIDENCE_ERROR',
         message: error?.message ?? 'No se pudo medir pausas y duraciones.',
+      };
+    }
+  }
+  let phoneticLiteralTranscription = null;
+  if (phoneticEvidence?.transcript) {
+    try {
+      phoneticLiteralTranscription = await transcribePhonemesLiterally({
+        client: linguisticClient,
+        model: linguisticModel,
+        targetLocale: rubric.spec.targetLocale,
+        phoneticEvidence,
+      });
+      speechEvidence = {
+        ...speechEvidence,
+        annotatedTranscript: phoneticLiteralTranscription?.text ?? null,
+        annotatedTranscriptStatus: phoneticLiteralTranscription
+          ? 'complete'
+          : 'unavailable',
+        annotatedTranscriptMethod:
+          phoneticLiteralTranscription?.methodId ?? null,
+        annotatedTranscriptError: null,
+      };
+    } catch (error) {
+      speechEvidence = {
+        ...speechEvidence,
+        annotatedTranscript: null,
+        annotatedTranscriptStatus: 'providerError',
+        annotatedTranscriptMethod:
+          'deepseek-phoneme-literal-transcription-v1',
+        annotatedTranscriptError: {
+          code: error?.code ?? 'PHONETIC_LITERAL_TRANSCRIPT_ERROR',
+          message:
+            error?.message ??
+            'No se pudo convertir la secuencia fonética en texto literal.',
+          details: error?.details ?? null,
+        },
       };
     }
   }
@@ -719,6 +765,7 @@ export async function runAssessment({
           parameters: {
             temperature: 0,
             responseFormat: 'json_object',
+            thinking: 'disabled',
           },
         },
         phonetic: {
@@ -730,6 +777,9 @@ export async function runAssessment({
           confidence: phoneticEvidence?.confidence ?? null,
           nativeLanguage: rubric.spec.nativeLanguage,
           judgeModel: linguisticModel,
+          literalTranscriptModel: linguisticModel,
+          literalTranscriptMethod:
+            phoneticLiteralTranscription?.methodId ?? null,
         },
       },
       calibrationVersion: CALIBRATION_VERSION,
@@ -754,6 +804,9 @@ export async function runAssessment({
       },
       phonetic: {
         input: phoneticEvidence ?? null,
+        literalTranscription: phoneticLiteralTranscription,
+        literalTranscriptionError:
+          speechEvidence.annotatedTranscriptError ?? null,
         judging: pronunciationJudging,
         error: pronunciationError,
       },

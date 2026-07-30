@@ -1225,6 +1225,9 @@ export function createApp({
                 report.providerEvidence?.linguistic?.error ?? null,
               pronunciation:
                 report.providerEvidence?.phonetic?.error ?? null,
+              phoneticLiteral:
+                report.providerEvidence?.phonetic
+                  ?.literalTranscriptionError ?? null,
             },
             dimensions: Object.fromEntries(
               Object.entries(report.dimensions ?? {}).map(
