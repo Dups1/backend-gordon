@@ -584,7 +584,7 @@ export async function runAssessment({
         annotatedTranscript: null,
         annotatedTranscriptStatus: 'providerError',
         annotatedTranscriptMethod:
-          'deepseek-phoneme-literal-transcription-v2',
+          'deepseek-phoneme-literal-transcription-v3',
         annotatedTranscriptError: {
           code: error?.code ?? 'PHONETIC_LITERAL_TRANSCRIPT_ERROR',
           message:

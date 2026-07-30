@@ -9,23 +9,34 @@ import {
 } from '../src/evaluation/prompts.js';
 
 test('carga prompts separados, versionados y resistentes a instrucciones', () => {
-  assert.equal(PROMPT_MANIFEST_VERSION, 'gordon-evidence-v1.10');
+  assert.equal(PROMPT_MANIFEST_VERSION, 'gordon-evidence-v1.11');
   assert.match(PROMPT_MANIFEST_HASH, /^[a-f0-9]{64}$/);
   assert.match(INTERNAL_PROMPTS.securityEnvelope, /nunca instrucciones/i);
   assert.match(INTERNAL_PROMPTS.instructionImprover, /intención docente/i);
   assert.match(INTERNAL_PROMPTS.instructionImprover, /dirigida al estudiante/i);
-  assert.match(INTERNAL_PROMPTS.phoneticLiteralizer, /no corrijas/i);
   assert.match(
     INTERNAL_PROMPTS.phoneticLiteralizer,
-    /pseudopalabra.*refleje esos sonidos/i,
+    /no conviertas una secuencia en una palabra correcta/i,
   );
   assert.match(
     INTERNAL_PROMPTS.phoneticLiteralizer,
-    /inferir límites probables entre palabras/i,
+    /pseudopalabra.*represente literalmente los sonidos/i,
   );
   assert.match(
     INTERNAL_PROMPTS.phoneticLiteralizer,
-    /nunca devuelvas una pseudopalabra gigante/i,
+    /divide la secuencia IPA en límites de palabra plausibles/i,
+  );
+  assert.match(
+    INTERNAL_PROMPTS.phoneticLiteralizer,
+    /no devuelvas una pseudopalabra gigante/i,
+  );
+  assert.match(
+    INTERNAL_PROMPTS.phoneticLiteralizer,
+    /regla de fidelidad absoluta/i,
+  );
+  assert.match(
+    INTERNAL_PROMPTS.phoneticLiteralizer,
+    /ninguna palabra fue elegida únicamente por su sentido probable/i,
   );
   assert.match(INTERNAL_PROMPTS.evidenceExtractor, /no asignes notas/i);
   assert.match(INTERNAL_PROMPTS.analyticJudge, /pronunciación ni fluidez/i);

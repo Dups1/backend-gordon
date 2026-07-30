@@ -316,6 +316,7 @@ const phoneticLiteralizationSchema = {
         additionalProperties: false,
         properties: {
           id: { type: 'string' },
+          original_ipa: { type: 'string' },
           tokens: {
             type: 'array',
             minItems: 1,
@@ -331,7 +332,7 @@ const phoneticLiteralizationSchema = {
             },
           },
         },
-        required: ['id', 'tokens'],
+        required: ['id', 'original_ipa', 'tokens'],
       },
     },
   },
@@ -975,7 +976,11 @@ function normalizeIpa(value) {
     : '';
 }
 
-function normalizeLiteralizedSegments(raw, sourceSegments) {
+function normalizeLiteralizedSegments(
+  raw,
+  sourceSegments,
+  { requireExactIpaCoverage = true } = {},
+) {
   const candidates = Array.isArray(raw?.segments) ? raw.segments : [];
   const byId = new Map();
   for (const candidate of candidates) {
@@ -1000,7 +1005,10 @@ function normalizeLiteralizedSegments(raw, sourceSegments) {
             ? token.written.trim()
             : '',
       }))
-      .filter((token) => token.ipa && token.written);
+      .filter(
+        (token) =>
+          token.written && (!requireExactIpaCoverage || token.ipa),
+      );
     if (!tokens.length || tokens.length !== candidate.tokens.length) {
       return null;
     }
@@ -1009,22 +1017,39 @@ function normalizeLiteralizedSegments(raw, sourceSegments) {
         (token) =>
           /\s/u.test(token.written) ||
           Array.from(token.written).length > 32 ||
-          Array.from(normalizeIpa(token.ipa)).length > 14,
+          (requireExactIpaCoverage &&
+            Array.from(normalizeIpa(token.ipa)).length > 14),
       )
     ) {
       return null;
     }
-    const reconstructedIpa = tokens
-      .map((token) => normalizeIpa(token.ipa))
-      .join('');
-    if (reconstructedIpa !== normalizeIpa(source.ipa)) return null;
+    if (
+      Array.from(normalizeIpa(source.ipa)).length > 14 &&
+      tokens.length < 2
+    ) {
+      return null;
+    }
+    if (requireExactIpaCoverage) {
+      if (
+        normalizeIpa(candidate.original_ipa) !== normalizeIpa(source.ipa)
+      ) {
+        return null;
+      }
+      const reconstructedIpa = tokens
+        .map((token) => normalizeIpa(token.ipa))
+        .join('');
+      if (reconstructedIpa !== normalizeIpa(source.ipa)) return null;
+    }
     normalized.push({
       ...source,
       tokens,
       written: tokens.map((token) => token.written).join(' '),
     });
   }
-  return normalized;
+  return {
+    segments: normalized,
+    exactIpaCoverage: requireExactIpaCoverage,
+  };
 }
 
 export async function transcribePhonemesLiterally({
@@ -1038,7 +1063,10 @@ export async function transcribePhonemesLiterally({
   const payload = {
     targetLocale,
     acousticModel: phoneticEvidence.model ?? null,
-    segments: sourceSegments,
+    segments: sourceSegments.map((segment) => ({
+      id: segment.id,
+      original_ipa: segment.ipa,
+    })),
   };
   const requestLiteralization = (system, schemaName) =>
     callStructured({
@@ -1055,15 +1083,23 @@ export async function transcribePhonemesLiterally({
     INTERNAL_PROMPTS.phoneticLiteralizer,
     'gordon_literal_transcript_from_phonemes',
   );
-  let segments = normalizeLiteralizedSegments(raw, sourceSegments);
-  if (!segments) {
+  let normalized =
+    normalizeLiteralizedSegments(raw, sourceSegments) ??
+    normalizeLiteralizedSegments(raw, sourceSegments, {
+      requireExactIpaCoverage: false,
+    });
+  if (!normalized) {
     raw = await requestLiteralization(
       `${INTERNAL_PROMPTS.phoneticLiteralizer}\n\nEl intento anterior no conservó todo el IPA o concatenó una frase completa como una sola pseudopalabra. Esta vez divide cada bloque largo en palabras o pseudopalabras cortas y verifica que la concatenación de los campos ipa sea idéntica al segmento de entrada.`,
       'gordon_literal_transcript_from_phonemes_repair',
     );
-    segments = normalizeLiteralizedSegments(raw, sourceSegments);
+    normalized =
+      normalizeLiteralizedSegments(raw, sourceSegments) ??
+      normalizeLiteralizedSegments(raw, sourceSegments, {
+        requireExactIpaCoverage: false,
+      });
   }
-  if (!segments) {
+  if (!normalized) {
     throw new EvaluationError(
       502,
       'El modelo no separó los fonemas en texto literal verificable.',
@@ -1075,14 +1111,16 @@ export async function transcribePhonemesLiterally({
       },
     );
   }
+  const { segments, exactIpaCoverage } = normalized;
   return {
     text: segments.map((segment) => segment.written).join(' '),
     segments,
-    methodId: 'deepseek-phoneme-literal-transcription-v2',
+    methodId: 'deepseek-phoneme-literal-transcription-v3',
     provider: 'opencode-zen',
     model,
     promptVersion: PROMPT_VERSION,
     usesWhisperReference: false,
+    exactIpaCoverage,
   };
 }
 

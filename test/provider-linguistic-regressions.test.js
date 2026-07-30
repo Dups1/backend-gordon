@@ -163,10 +163,12 @@ test('convierte fonemas en texto literal sin recibir Whisper ni una frase espera
       segments: [
         {
           id: 'p0',
+          original_ipa: 'ðæpən',
           tokens: [{ ipa: 'ðæpən', written: 'dhapen' }],
         },
         {
           id: 'p1',
+          original_ipa: 'ɹoʊ',
           tokens: [{ ipa: 'ɹoʊ', written: 'rou' }],
         },
       ],
@@ -187,22 +189,60 @@ test('convierte fonemas en texto literal sin recibir Whisper ni una frase espera
 
   assert.equal(result.text, 'dhapen rou');
   assert.equal(result.usesWhisperReference, false);
+  assert.equal(result.exactIpaCoverage, true);
   assert.equal(
     result.methodId,
-    'deepseek-phoneme-literal-transcription-v2',
+    'deepseek-phoneme-literal-transcription-v3',
   );
   const request = JSON.parse(client.calls[0].messages[1].content).data;
   assert.deepEqual(request, {
     targetLocale: 'en-US',
     acousticModel: 'wav2vec2-phoneme-en',
     segments: [
-      { id: 'p0', ipa: 'ðæpən' },
-      { id: 'p1', ipa: 'ɹoʊ' },
+      { id: 'p0', original_ipa: 'ðæpən' },
+      { id: 'p1', original_ipa: 'ɹoʊ' },
     ],
   });
   assert.equal(JSON.stringify(request).includes('Whisper'), false);
   assert.equal(JSON.stringify(request).includes('instruction'), false);
-  assert.match(client.calls[0].messages[0].content, /no corrijas/i);
+  assert.match(
+    client.calls[0].messages[0].content,
+    /no conviertas una secuencia en una palabra correcta/i,
+  );
+});
+
+test('conserva una conversión legible si DeepSeek no copia el IPA con exactitud', async () => {
+  const response = {
+    segments: [
+      {
+        id: 'p0',
+        original_ipa: 'fəloʊmaɪneɪmɪz',
+        tokens: [
+          { ipa: 'həloʊ', written: 'fello' },
+          { ipa: 'maɪ', written: 'my' },
+          { ipa: 'neɪm', written: 'name' },
+          { ipa: 'ɪz', written: 'is' },
+        ],
+      },
+    ],
+  };
+  const client = structuredClient([response]);
+
+  const result = await transcribePhonemesLiterally({
+    client,
+    model: 'deepseek-v4-flash',
+    targetLocale: 'en-US',
+    phoneticEvidence: {
+      transcript: 'fəloʊmaɪneɪmɪz',
+      model: 'wav2vec2-phoneme-en',
+      confidence: 0.83,
+      events: [],
+    },
+  });
+
+  assert.equal(result.text, 'fello my name is');
+  assert.equal(result.exactIpaCoverage, false);
+  assert.equal(client.calls.length, 1);
 });
 
 test('infiere espacios sin corregir un fonema pronunciado incorrectamente', async () => {
@@ -211,6 +251,7 @@ test('infiere espacios sin corregir un fonema pronunciado incorrectamente', asyn
       segments: [
         {
           id: 'p0',
+          original_ipa: 'fəloʊmaɪneɪmɪz',
           tokens: [
             { ipa: 'fəloʊ', written: 'fello' },
             { ipa: 'maɪ', written: 'my' },
@@ -249,6 +290,7 @@ test('reintenta cuando DeepSeek concatena una frase como una sola palabra', asyn
       segments: [
         {
           id: 'p0',
+          original_ipa: ipa,
           tokens: [{ ipa, written: 'hellomynameis' }],
         },
       ],
@@ -257,6 +299,7 @@ test('reintenta cuando DeepSeek concatena una frase como una sola palabra', asyn
       segments: [
         {
           id: 'p0',
+          original_ipa: ipa,
           tokens: [
             { ipa: 'həloʊ', written: 'hello' },
             { ipa: 'maɪ', written: 'my' },
