@@ -11,6 +11,7 @@ import ffmpegPath from 'ffmpeg-static';
 import Groq from 'groq-sdk';
 import helmet from 'helmet';
 import multer from 'multer';
+import OpenAI from 'openai';
 
 import {
   EvaluationError,
@@ -38,8 +39,11 @@ import {
 } from './whisper.js';
 
 export const GROQ_MODEL = 'whisper-large-v3';
-export const GROQ_GRAMMAR_MODEL =
-  process.env.GROQ_GRAMMAR_MODEL?.trim() || 'openai/gpt-oss-20b';
+export const LINGUISTIC_MODEL =
+  process.env.OPENCODE_MODEL?.trim() || 'deepseek-v4-flash';
+export const OPENCODE_BASE_URL =
+  process.env.OPENCODE_BASE_URL?.trim() ||
+  'https://opencode.ai/zen/v1';
 export const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
 export const MIN_PAUSE_SECONDS = 0.6;
 export const MIN_ELONGATION_SECONDS = 0.9;
@@ -470,6 +474,26 @@ function obtenerClienteGroq(clienteInyectado) {
   return new Groq({ apiKey });
 }
 
+function obtenerClienteLinguistico(clienteInyectado) {
+  if (clienteInyectado) {
+    return clienteInyectado;
+  }
+
+  const apiKey = process.env.OPENCODE_API_KEY?.trim();
+  if (!apiKey) {
+    throw new ErrorHttp(
+      503,
+      'El servicio de evaluación lingüística aún no está configurado.',
+      'OPENCODE_NO_CONFIGURADO',
+    );
+  }
+
+  return new OpenAI({
+    apiKey,
+    baseURL: OPENCODE_BASE_URL,
+  });
+}
+
 function textoOpcional(valor) {
   return typeof valor === 'string' ? valor.trim() : '';
 }
@@ -573,8 +597,8 @@ function normalizarEvaluacionGramatical(respuesta, texto) {
       )
     : [];
   return {
-    provider: 'groq',
-    model: GROQ_GRAMMAR_MODEL,
+    provider: 'opencode-zen',
+    model: LINGUISTIC_MODEL,
     sufficientEvidence: parsed.sufficientEvidence === true,
     score,
     summary: textoOpcional(parsed.summary),
@@ -609,19 +633,18 @@ function errorDeGroq(error) {
   );
 }
 
-export async function evaluarGramaticaGroq({
+export async function evaluarGramaticaDeepSeek({
   cliente,
   texto,
   idioma,
   criterioEvaluacion,
   evidenciaTecnica,
-  modelo = GROQ_GRAMMAR_MODEL,
+  modelo = LINGUISTIC_MODEL,
 }) {
   const respuesta = await cliente.chat.completions.create({
     model: modelo,
     temperature: 0,
-    max_completion_tokens: 1800,
-    reasoning_effort: 'low',
+    max_tokens: 1800,
     messages: [
       {
         role: 'system',
@@ -630,17 +653,10 @@ export async function evaluarGramaticaGroq({
       },
       {
         role: 'user',
-        content: `Idioma esperado o detectado: ${idioma || 'desconocido'}\n\n<instruccion_docente>\n${criterioEvaluacion || 'Evaluación general de la producción oral.'}\n</instruccion_docente>\n\n<transcripcion>\n${texto}\n</transcripcion>\n\n<evidencia_tecnica>\n${JSON.stringify(evidenciaTecnica ?? {})}\n</evidencia_tecnica>`,
+        content: `Devuelve únicamente un objeto JSON válido que cumpla este esquema:\n${JSON.stringify(esquemaEvaluacionGramatical)}\n\nIdioma esperado o detectado: ${idioma || 'desconocido'}\n\n<instruccion_docente>\n${criterioEvaluacion || 'Evaluación general de la producción oral.'}\n</instruccion_docente>\n\n<transcripcion>\n${texto}\n</transcripcion>\n\n<evidencia_tecnica>\n${JSON.stringify(evidenciaTecnica ?? {})}\n</evidencia_tecnica>`,
       },
     ],
-    response_format: {
-      type: 'json_schema',
-      json_schema: {
-        name: 'grammar_assessment',
-        strict: true,
-        schema: esquemaEvaluacionGramatical,
-      },
-    },
+    response_format: { type: 'json_object' },
   });
 
   return normalizarEvaluacionGramatical(respuesta, texto);
@@ -852,11 +868,12 @@ function validarCalificacionesHumanas(body) {
 
 export function createApp({
   groqClient,
+  linguisticClient,
   corsOrigin = process.env.CORS_ORIGIN ?? '*',
   maxAudioBytes = MAX_AUDIO_BYTES,
   convertirOpus = convertirOpusAFlac,
   analizarHabla = analizarEvidenciaHablaAudio,
-  analizarGramatica = evaluarGramaticaGroq,
+  analizarGramatica = evaluarGramaticaDeepSeek,
   prepararAudio = prepareAudio,
   ejecutarEvaluacion = runAssessment,
   compilarRubrica = enhanceRubricDraftWithAI,
@@ -935,6 +952,7 @@ export function createApp({
       ok: true,
       service: 'backend-gordon',
       model: GROQ_MODEL,
+      linguisticModel: LINGUISTIC_MODEL,
       promptVersion: PROMPT_MANIFEST_VERSION,
     });
   });
@@ -942,6 +960,9 @@ export function createApp({
   app.get('/ready', (_request, response) => {
     const checks = {
       groq: Boolean(groqClient || process.env.GROQ_API_KEY?.trim()),
+      openCode: Boolean(
+        linguisticClient || process.env.OPENCODE_API_KEY?.trim(),
+      ),
       ffmpeg: Boolean(ffmpegPath),
       rubricSigningSecret: Boolean(
         rubricSigningSecret || process.env.RUBRIC_SIGNING_SECRET?.trim(),
@@ -949,7 +970,11 @@ export function createApp({
       pilotStorage: almacenamientoPiloto?.configured === true,
       corsRestricted: corsOrigin !== '*',
     };
-    const ready = checks.groq && checks.ffmpeg && checks.rubricSigningSecret;
+    const ready =
+      checks.groq &&
+      checks.openCode &&
+      checks.ffmpeg &&
+      checks.rubricSigningSecret;
     response.status(ready ? 200 : 503).json({
       ready,
       service: 'backend-gordon',
@@ -966,8 +991,8 @@ export function createApp({
     try {
       const spec = normalizeEvaluationSpec(request.body);
       const improvement = await mejorarConsigna({
-        client: obtenerClienteGroq(groqClient),
-        model: GROQ_GRAMMAR_MODEL,
+        client: obtenerClienteLinguistico(linguisticClient),
+        model: LINGUISTIC_MODEL,
         spec,
       });
       response.json({
@@ -996,13 +1021,13 @@ export function createApp({
       };
       try {
         draft = await compilarRubrica({
-          client: obtenerClienteGroq(groqClient),
-          model: GROQ_GRAMMAR_MODEL,
+          client: obtenerClienteLinguistico(linguisticClient),
+          model: LINGUISTIC_MODEL,
           draft: baseDraft,
         });
         generatedBy = {
-          method: 'gpt-oss-structured-rubric-compiler',
-          model: GROQ_GRAMMAR_MODEL,
+          method: 'deepseek-v4-structured-rubric-compiler',
+          model: LINGUISTIC_MODEL,
           promptVersion: PROMPT_MANIFEST_VERSION,
           promptHash: PROMPT_MANIFEST_HASH,
           reviewRequired: true,
@@ -1103,7 +1128,10 @@ export function createApp({
           response.json(cached.report);
           return;
         }
-        const cliente = obtenerClienteGroq(groqClient);
+        const clienteWhisper = obtenerClienteGroq(groqClient);
+        const clienteLinguistico = obtenerClienteLinguistico(
+          linguisticClient,
+        );
         const requestId = request.gordonRequestId;
         const report = await ejecutarEvaluacion({
           rubric,
@@ -1111,8 +1139,9 @@ export function createApp({
           normalizedAudio: normalizedPath,
           signature: prepared.signature,
           quality: prepared.quality,
-          groqClient: cliente,
-          linguisticModel: GROQ_GRAMMAR_MODEL,
+          groqClient: clienteWhisper,
+          linguisticClient: clienteLinguistico,
+          linguisticModel: LINGUISTIC_MODEL,
           whisperModel: GROQ_MODEL,
           analyzeSpeech: analizarHabla,
           phoneticEvidence: evidenciaFoneticaDesdeMultipart(request.body),
@@ -1284,7 +1313,10 @@ export function createApp({
         const instruccionEvaluacion = validarInstruccionEvaluacion(
           request.body.evaluationPrompt,
         );
-        const cliente = obtenerClienteGroq(groqClient);
+        const clienteWhisper = obtenerClienteGroq(groqClient);
+        const clienteLinguistico = obtenerClienteLinguistico(
+          linguisticClient,
+        );
         const esOpus =
           path.extname(request.file.originalname).toLowerCase() === '.opus';
         if (esOpus) {
@@ -1301,7 +1333,8 @@ export function createApp({
 
         let resultado;
         try {
-          resultado = await cliente.audio.transcriptions.create(opciones);
+          resultado =
+            await clienteWhisper.audio.transcriptions.create(opciones);
         } catch (error) {
           throw errorDeGroq(error);
         }
@@ -1377,7 +1410,7 @@ export function createApp({
         let errorGramatica = null;
         try {
           gramatica = await analizarGramatica({
-            cliente,
+            cliente: clienteLinguistico,
             texto: resultado.text?.trim() ?? '',
             idioma: language || resultado.language || '',
             criterioEvaluacion: instruccionEvaluacion,

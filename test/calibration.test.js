@@ -149,7 +149,7 @@ test('rechaza etiquetas automáticas como verdad de calibración', () => {
     automaticScore: 75,
     humanBand: 3,
   });
-  input.labelSource = 'gpt-oss';
+  input.labelSource = 'deepseek-v4-flash';
   assert.throws(
     () => analyzeCalibrationRecords([input]),
     (error) => error.code === 'HUMAN_LABEL_REQUIRED',

@@ -3,7 +3,8 @@
 Motor Node.js de evaluación oral para Gordon:
 
 - Whisper Large-v3: transcripción y timestamps.
-- GPT-OSS: rúbrica, evidencia lingüística, doble juez y recomendación.
+- DeepSeek V4 Flash mediante OpenCode Zen: rúbrica, evidencia lingüística,
+  doble juez, pronunciación fonética y recomendación.
 - Gordon: calidad del audio, abstención, puntuación y procedencia.
 - Wav2Vec2 local: evidencia fonética experimental en desarrollo.
 
@@ -35,7 +36,7 @@ análisis gramatical. Ya no devuelve evaluación remota de pronunciación.
 
 ## Configuración
 
-Requiere Node.js 20:
+Requiere Node.js 22 o posterior:
 
 ```bash
 npm install
@@ -48,8 +49,10 @@ Variables:
 - `GROQ_API_KEY`
 - `RUBRIC_SIGNING_SECRET`
 - `CORS_ORIGIN`
-- `GROQ_GRAMMAR_MODEL` (opcional)
-- `GROQ_LINGUISTIC_TPM_LIMIT` (opcional)
+- `OPENCODE_API_KEY`
+- `OPENCODE_MODEL` (opcional; predeterminado `deepseek-v4-flash`)
+- `OPENCODE_BASE_URL` (opcional; predeterminado `https://opencode.ai/zen/v1`)
+- `OPENCODE_LINGUISTIC_TPM_LIMIT` (opcional)
 - `MAX_CONCURRENT_ASSESSMENTS` (opcional)
 - `RATE_LIMIT_PER_MINUTE` (opcional)
 
@@ -62,7 +65,7 @@ nuevo. Los audios temporales se eliminan al terminar cada solicitud.
 - Build Command: `npm ci`
 - Start Command: `npm start`
 - Health Check Path: `/health`
-- Runtime: Node 20+
+- Runtime: Node 22+ (Render lo selecciona desde `engines.node`)
 
 ## Pruebas
 

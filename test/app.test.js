@@ -7,8 +7,8 @@ import request from 'supertest';
 import {
   createApp,
   crearEvidenciaHabla,
-  GROQ_GRAMMAR_MODEL,
   GROQ_MODEL,
+  LINGUISTIC_MODEL,
 } from '../src/app.js';
 import {
   WHISPER_LITERAL_POLICY_VERSION,
@@ -60,7 +60,8 @@ test('expone el estado del servicio y el modelo configurado', async () => {
     ok: true,
     service: 'backend-gordon',
     model: GROQ_MODEL,
-    promptVersion: 'gordon-evidence-v1.5',
+    linguisticModel: LINGUISTIC_MODEL,
+    promptVersion: 'gordon-evidence-v1.6',
   });
 });
 
@@ -114,7 +115,9 @@ test('envía el audio a Groq y devuelve la transcripción', async () => {
     };
   });
 
-  const response = await request(createApp({ groqClient }))
+  const response = await request(
+    createApp({ groqClient, linguisticClient: groqClient }),
+  )
     .post('/api/transcriptions')
     .field('language', 'ES')
     .field('prompt', 'Conversación académica')
@@ -157,8 +160,8 @@ test('envía el audio a Groq y devuelve la transcripción', async () => {
     ],
     speechEvidence: null,
     grammar: {
-      provider: 'groq',
-      model: GROQ_GRAMMAR_MODEL,
+      provider: 'opencode-zen',
+      model: LINGUISTIC_MODEL,
       sufficientEvidence: true,
       score: 100,
       summary: 'No se detectaron errores gramaticales.',
@@ -241,7 +244,9 @@ test('detecta errores gramaticales con evidencia literal y descarta inventados',
     },
   );
 
-  const response = await request(createApp({ groqClient }))
+  const response = await request(
+    createApp({ groqClient, linguisticClient: groqClient }),
+  )
     .post('/api/transcriptions')
     .field('language', 'en')
     .field('evaluationPrompt', 'Evalúa concordancia para nivel A2.')
@@ -251,11 +256,9 @@ test('detecta errores gramaticales con evidencia literal y descarta inventados',
     })
     .expect(200);
 
-  assert.equal(opcionesGramatica.model, GROQ_GRAMMAR_MODEL);
-  assert.equal(
-    opcionesGramatica.response_format.json_schema.strict,
-    true,
-  );
+  assert.equal(opcionesGramatica.model, LINGUISTIC_MODEL);
+  assert.equal(opcionesGramatica.response_format.type, 'json_object');
+  assert.equal(opcionesGramatica.max_tokens, 1800);
   assert.match(
     opcionesGramatica.messages[1].content,
     /<instruccion_docente>\nEvalúa concordancia para nivel A2\.\n<\/instruccion_docente>/,
@@ -333,7 +336,9 @@ test('elimina el archivo temporal aunque Groq responda con error', async () => {
     throw new Error('fallo simulado');
   });
 
-  const response = await request(createApp({ groqClient }))
+  const response = await request(
+    createApp({ groqClient, linguisticClient: groqClient }),
+  )
     .post('/api/transcriptions')
     .attach('audio', Buffer.from('audio simulado'), {
       filename: 'grabacion.wav',
@@ -361,7 +366,13 @@ test('convierte OPUS antes de enviarlo a Groq y limpia ambos archivos', async ()
     return { text: 'Audio OPUS transcrito.' };
   });
 
-  const response = await request(createApp({ groqClient, convertirOpus }))
+  const response = await request(
+    createApp({
+      groqClient,
+      linguisticClient: groqClient,
+      convertirOpus,
+    }),
+  )
     .post('/api/transcriptions')
     .attach('audio', Buffer.from('opus simulado'), {
       filename: 'nota-de-voz.opus',

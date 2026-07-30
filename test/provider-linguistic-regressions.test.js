@@ -155,16 +155,8 @@ test('juzga IPA con inteligibilidad y contexto de lengua materna', async () => {
   assert.equal(client.pendingResponses, 0);
 });
 
-test('reintenta el juez fonético en JSON Object Mode tras un HTTP 400', async () => {
-  const rejected = Object.assign(
-    new Error('Invalid response_format configuration'),
-    {
-      status: 400,
-      error: { message: 'JSON schema configuration rejected' },
-    },
-  );
+test('usa JSON Object Mode y valida localmente el juez fonético', async () => {
   const client = structuredClient([
-    rejected,
     {
       band: 3,
       rationale: 'La palabra sigue siendo inteligible.',
@@ -208,14 +200,11 @@ test('reintenta el juez fonético en JSON Object Mode tras un HTTP 400', async (
   assert.equal(result.status, 'scored');
   assert.equal(result.band, 3);
   assert.equal(result.observations[0].observed, 'həloʊ');
-  assert.equal(client.calls.length, 2);
-  assert.equal(client.calls[0].response_format.type, 'json_schema');
-  assert.equal(client.calls[1].response_format.type, 'json_object');
-  const fallbackPayload = JSON.parse(
-    client.calls[1].messages[1].content,
-  );
-  assert.equal(fallbackPayload.data.observedIpa, undefined);
-  assert.equal(fallbackPayload.outputSchema.required.includes('band'), true);
+  assert.equal(client.calls.length, 1);
+  assert.equal(client.calls[0].response_format.type, 'json_object');
+  const outputPayload = JSON.parse(client.calls[0].messages[1].content);
+  assert.equal(outputPayload.data.observedIpa, undefined);
+  assert.equal(outputPayload.outputSchema.required.includes('band'), true);
   assert.equal(client.pendingResponses, 0);
 });
 
@@ -329,11 +318,11 @@ test('una muestra de 24.8 s con voz y palabras suficientes llega al extractor', 
   assert.ok(evidence.sufficiency.lexicalCount >= 30);
   assert.ok(evidence.sufficiency.voicedSeconds >= 15);
   assert.equal(client.pendingResponses, 0);
-  assert.equal(client.calls[0].max_completion_tokens, 1800);
+  assert.equal(client.calls[0].max_tokens, 1800);
   assert.equal(client.calls[0].requestOptions.maxRetries, 0);
 });
 
-test('respeta retry-after de Groq y recupera el extractor tras un 429', async () => {
+test('respeta retry-after de OpenCode y recupera el extractor tras un 429', async () => {
   let attempts = 0;
   const response = {
     sufficientEvidence: true,
@@ -531,7 +520,7 @@ test('compacta una muestra larga antes de enviarla al extractor', async () => {
     Array.isArray(request.data.asrComparison.uncertainPrimaryTokenIndices),
   );
   assert.ok(client.calls[0].messages[1].content.length < 16_000);
-  assert.equal(client.calls[0].max_completion_tokens, 1800);
+  assert.equal(client.calls[0].max_tokens, 1800);
 });
 
 test('conserva la extracción válida si falla una reparación complementaria', async () => {
@@ -603,8 +592,8 @@ test('conserva la extracción válida si falla una reparación complementaria', 
 });
 
 test('serializa las llamadas lingüísticas concurrentes por instancia', async () => {
-  const previousLimit = process.env.GROQ_LINGUISTIC_TPM_LIMIT;
-  process.env.GROQ_LINGUISTIC_TPM_LIMIT = '50000';
+  const previousLimit = process.env.OPENCODE_LINGUISTIC_TPM_LIMIT;
+  process.env.OPENCODE_LINGUISTIC_TPM_LIMIT = '50000';
   resetLinguisticGovernorForTests();
   let inFlight = 0;
   let maximumInFlight = 0;
@@ -667,7 +656,7 @@ test('serializa las llamadas lingüísticas concurrentes por instancia', async (
   };
   const input = {
     client,
-    model: 'openai/gpt-oss-20b',
+    model: 'deepseek-v4-flash',
     rubric: { spec: { mode: 'spontaneous' } },
     transcript:
       'I described it and explained why the trip mattered to my family.',
@@ -685,16 +674,16 @@ test('serializa las llamadas lingüísticas concurrentes por instancia', async (
   } finally {
     resetLinguisticGovernorForTests();
     if (previousLimit === undefined) {
-      delete process.env.GROQ_LINGUISTIC_TPM_LIMIT;
+      delete process.env.OPENCODE_LINGUISTIC_TPM_LIMIT;
     } else {
-      process.env.GROQ_LINGUISTIC_TPM_LIMIT = previousLimit;
+      process.env.OPENCODE_LINGUISTIC_TPM_LIMIT = previousLimit;
     }
   }
 });
 
 test('rechaza localmente una etapa que no cabe en el presupuesto TPM', async () => {
-  const previousLimit = process.env.GROQ_LINGUISTIC_TPM_LIMIT;
-  process.env.GROQ_LINGUISTIC_TPM_LIMIT = '500';
+  const previousLimit = process.env.OPENCODE_LINGUISTIC_TPM_LIMIT;
+  process.env.OPENCODE_LINGUISTIC_TPM_LIMIT = '500';
   resetLinguisticGovernorForTests();
   let attempts = 0;
   const client = {
@@ -712,7 +701,7 @@ test('rechaza localmente una etapa que no cabe en el presupuesto TPM', async () 
     await assert.rejects(
       extractLinguisticEvidence({
         client,
-        model: 'openai/gpt-oss-20b',
+        model: 'deepseek-v4-flash',
         rubric: { spec: { mode: 'spontaneous' } },
         transcript:
           'I described a complete journey with routes tickets stations hotels schedules prices safety comfort transportation plans and several detailed reasons for each decision.',
@@ -733,9 +722,9 @@ test('rechaza localmente una etapa que no cabe en el presupuesto TPM', async () 
   } finally {
     resetLinguisticGovernorForTests();
     if (previousLimit === undefined) {
-      delete process.env.GROQ_LINGUISTIC_TPM_LIMIT;
+      delete process.env.OPENCODE_LINGUISTIC_TPM_LIMIT;
     } else {
-      process.env.GROQ_LINGUISTIC_TPM_LIMIT = previousLimit;
+      process.env.OPENCODE_LINGUISTIC_TPM_LIMIT = previousLimit;
     }
   }
 });

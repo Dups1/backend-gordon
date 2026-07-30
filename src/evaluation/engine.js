@@ -104,7 +104,7 @@ export function pronunciationFromPhoneticJudge({
     return dimensionResult({
       id: 'pronunciation',
       status: 'providerError',
-      methodId: 'gpt-oss-phonetic-judge-v1',
+      methodId: 'deepseek-v4-phonetic-judge-v1',
       reliability: 'unknown',
       reasonCode: error.code ?? 'PHONETIC_JUDGE_ERROR',
       limitations: [error.message],
@@ -141,7 +141,7 @@ export function pronunciationFromPhoneticJudge({
       high: Math.min(100, score + 15),
     },
     reliability,
-    methodId: 'gpt-oss-phonetic-judge-v1',
+    methodId: 'deepseek-v4-phonetic-judge-v1',
     evidence: (judged.observations ?? []).map((observation, index) => {
       const alignment = alignments.get(observation.alignmentId);
       return {
@@ -155,7 +155,7 @@ export function pronunciationFromPhoneticJudge({
         affectsIntelligibility: observation.affectsIntelligibility,
         startSec: alignment?.startSec ?? null,
         endSec: alignment?.endSec ?? null,
-        source: 'wav2vec2-local+gpt-oss',
+        source: 'wav2vec2-local+deepseek-v4',
       };
     }),
     limitations: [
@@ -305,7 +305,7 @@ function linguisticDimension({
     return dimensionResult({
       id,
       status: 'providerError',
-      methodId: 'gpt-oss-double-judge',
+      methodId: 'deepseek-v4-double-judge',
       reliability: 'unknown',
       reasonCode: providerError.code ?? 'LINGUISTIC_PROVIDER_ERROR',
       limitations: [providerError.message],
@@ -318,7 +318,7 @@ function linguisticDimension({
     return dimensionResult({
       id,
       status: 'insufficientEvidence',
-      methodId: 'gpt-oss-double-judge',
+      methodId: 'deepseek-v4-double-judge',
       reliability: 'unknown',
       reasonCode:
         item?.reasonCode ?? 'INSUFFICIENT_LINGUISTIC_EVIDENCE',
@@ -343,7 +343,7 @@ function linguisticDimension({
     interval90: item.interval90,
     reliability:
       item.judgeAgreement && !item.reviewRequired ? 'medium' : 'low',
-    methodId: 'gpt-oss-double-judge',
+    methodId: 'deepseek-v4-double-judge',
     evidence: (evidence?.findings ?? []).filter((finding) =>
       selectedEvidence.has(finding.id),
     ),
@@ -403,6 +403,7 @@ export async function runAssessment({
   signature,
   quality,
   groqClient,
+  linguisticClient = groqClient,
   linguisticModel,
   whisperModel,
   analyzeSpeech,
@@ -562,7 +563,7 @@ export async function runAssessment({
     try {
       linguisticEvidence = attachLinguisticTimestamps(
         await extractLinguisticEvidence({
-          client: groqClient,
+          client: linguisticClient,
           model: linguisticModel,
           rubric,
           transcript: transcript.primary.text,
@@ -575,7 +576,7 @@ export async function runAssessment({
         whisperEvidence,
       );
       judging = await runDoubleLinguisticJudging({
-        client: groqClient,
+        client: linguisticClient,
         model: linguisticModel,
         rubric,
         evidence: linguisticEvidence,
@@ -595,7 +596,7 @@ export async function runAssessment({
   if (whisper && phoneticEvidence?.transcript) {
     try {
       pronunciationJudging = await judgePronunciationFromPhonetics({
-        client: groqClient,
+        client: linguisticClient,
         model: linguisticModel,
         rubric,
         transcript: whisperEvidence.text,
@@ -669,7 +670,7 @@ export async function runAssessment({
   if (linguisticEvidence && judging) {
     try {
       feedback = await generatePedagogicalFeedback({
-        client: groqClient,
+        client: linguisticClient,
         model: linguisticModel,
         rubric,
         dimensions,
@@ -710,15 +711,14 @@ export async function runAssessment({
           },
         },
         linguistic: {
-          provider: 'groq',
+          provider: 'opencode-zen',
           model: linguisticModel,
           promptVersion: PROMPT_VERSION,
           doubleJudge: true,
           adjudicated: judging?.adjudicated ?? false,
           parameters: {
             temperature: 0,
-            reasoningEffort: 'low',
-            responseFormat: 'json_schema_strict',
+            responseFormat: 'json_object',
           },
         },
         phonetic: {

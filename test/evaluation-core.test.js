@@ -377,6 +377,7 @@ test('expone el flujo v2 síncrono con confirmación previa y audio real', async
   };
   const app = createApp({
     groqClient: {},
+    linguisticClient: {},
     logger: {
       info(message) {
         logs.push(JSON.parse(message));
@@ -510,6 +511,7 @@ test('mejora una consigna sin ocultar ni reemplazar el texto original', async ()
   let specRecibida;
   const app = createApp({
     groqClient: {},
+    linguisticClient: {},
     mejorarConsigna: async ({ spec }) => {
       specRecibida = spec;
       return {
@@ -524,7 +526,7 @@ test('mejora una consigna sin ocultar ni reemplazar el texto original', async ()
         ],
         warnings: [],
         generatedBy: {
-          provider: 'groq',
+          provider: 'opencode-zen',
           model: 'test-model',
         },
       };

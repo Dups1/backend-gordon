@@ -14,6 +14,12 @@ if (!process.env.GROQ_API_KEY?.trim()) {
   );
   process.exit(1);
 }
+if (!process.env.OPENCODE_API_KEY?.trim()) {
+  console.error(
+    'Falta OPENCODE_API_KEY. Configúrala en el entorno antes de iniciar el servicio.',
+  );
+  process.exit(1);
+}
 
 const app = createApp({ logger: console });
 const server = app.listen(port, '0.0.0.0', () => {

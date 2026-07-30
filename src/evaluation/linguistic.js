@@ -436,7 +436,7 @@ function providerFailure(error, stage) {
       status: 502,
       code: 'LINGUISTIC_REQUEST_INVALID',
       message:
-        'Groq rechazó la configuración de la solicitud lingüística.',
+        'OpenCode rechazó la configuración de la solicitud lingüística.',
     },
     413: {
       status: 502,
@@ -448,12 +448,12 @@ function providerFailure(error, stage) {
       status: 502,
       code: 'LINGUISTIC_GENERATION_REJECTED',
       message:
-        'Groq no pudo completar la salida lingüística estructurada.',
+        'OpenCode no pudo completar la salida lingüística estructurada.',
     },
     429: {
       status: 429,
       code: 'LINGUISTIC_RATE_LIMIT',
-      message: 'El modelo lingüístico alcanzó su límite temporal.',
+      message: 'DeepSeek V4 Flash alcanzó temporalmente su límite.',
     },
   };
   const classification = classifications[status] ?? {
@@ -490,23 +490,23 @@ function positiveInteger(value, fallback) {
 }
 
 function linguisticTpmLimit(model) {
-  const configured = process.env.GROQ_LINGUISTIC_TPM_LIMIT;
+  const configured = process.env.OPENCODE_LINGUISTIC_TPM_LIMIT;
   if (configured === '0') return null;
-  if (!configured && !/gpt-oss/i.test(model)) return null;
+  if (!configured) return null;
   return positiveInteger(configured, DEFAULT_LINGUISTIC_TPM_LIMIT);
 }
 
 function linguisticTpmWindowMs() {
   return positiveInteger(
-    process.env.GROQ_LINGUISTIC_TPM_WINDOW_MS,
+    process.env.OPENCODE_LINGUISTIC_TPM_WINDOW_MS,
     DEFAULT_LINGUISTIC_TPM_WINDOW_MS,
   );
 }
 
-function estimateGroqRequestTokens(request, maxTokens) {
+function estimateLinguisticRequestTokens(request, maxTokens) {
   // JSON, schemas and Harmony control tokens are denser than ordinary prose.
   // Three UTF-8 bytes per token plus fixed overhead is deliberately
-  // conservative and keeps the request below Groq's advertised TPM ceiling.
+  // conservative when a provider-side budget is configured.
   const inputBytes = Buffer.byteLength(JSON.stringify(request), 'utf8');
   const estimatedInputTokens = Math.ceil(inputBytes / 3) + 256;
   return {
@@ -605,35 +605,33 @@ async function callStructured({
   system,
   payload,
   maxTokens = 2000,
-  jsonObjectFallback = false,
 }) {
   const request = {
     model,
     temperature: 0,
-    reasoning_effort: 'low',
-    max_completion_tokens: maxTokens,
+    max_tokens: maxTokens,
     messages: [
       { role: 'system', content: system },
       {
         role: 'user',
         content: JSON.stringify({
           security: INTERNAL_PROMPTS.securityEnvelope,
+          outputSchema: schema,
           data: payload,
         }),
       },
     ],
-    response_format: {
-      type: 'json_schema',
-      json_schema: { name: schemaName, strict: true, schema },
-    },
+    response_format: { type: 'json_object' },
   };
-  const requestEstimate = estimateGroqRequestTokens(request, maxTokens);
+  const requestEstimate = estimateLinguisticRequestTokens(
+    request,
+    maxTokens,
+  );
 
   return withLinguisticQueue(() =>
-    withCircuitBreaker('groq-linguistic', async () => {
+    withCircuitBreaker('opencode-linguistic', async () => {
       let response;
       let lastError;
-      let activeEstimate = requestEstimate;
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
           await reserveLinguisticTokens({
@@ -654,62 +652,11 @@ async function callStructured({
           );
         }
       }
-      if (
-        !response &&
-        jsonObjectFallback &&
-        Number(lastError?.status) === 400
-      ) {
-        const fallbackRequest = {
-          ...request,
-          messages: [
-            {
-              role: 'system',
-              content:
-                `${system}\n` +
-                'El proveedor no aceptó el modo de esquema estricto. Devuelve un único objeto JSON que respete exactamente outputSchema, sin Markdown ni texto adicional.',
-            },
-            {
-              role: 'user',
-              content: JSON.stringify({
-                security: INTERNAL_PROMPTS.securityEnvelope,
-                outputSchema: schema,
-                data: payload,
-              }),
-            },
-          ],
-          response_format: { type: 'json_object' },
-        };
-        activeEstimate = estimateGroqRequestTokens(
-          fallbackRequest,
-          maxTokens,
-        );
-        lastError = null;
-        for (let attempt = 0; attempt < 3; attempt++) {
-          try {
-            await reserveLinguisticTokens({
-              model,
-              ...activeEstimate,
-            });
-            response = await client.chat.completions.create(
-              fallbackRequest,
-              { timeout: 120_000, maxRetries: 0 },
-            );
-            break;
-          } catch (error) {
-            lastError = error;
-            const retryable = retryableProviderError(error);
-            if (!retryable || attempt === 2) break;
-            await new Promise((resolve) =>
-              setTimeout(resolve, retryDelayMilliseconds(error, attempt)),
-            );
-          }
-        }
-      }
       if (!response) {
         const failure = providerFailure(lastError, schemaName);
         failure.details = {
           ...(failure.details ?? {}),
-          ...activeEstimate,
+          ...requestEstimate,
           maxCompletionTokens: maxTokens,
         };
         throw failure;
@@ -817,7 +764,7 @@ export async function enhanceRubricDraftWithAI({
           .slice(0, 8)
       : [],
     generatedBy: {
-      provider: 'groq',
+      provider: 'opencode-zen',
       model,
       promptVersion: PROMPT_VERSION,
     },
@@ -871,7 +818,6 @@ export async function judgePronunciationFromPhonetics({
         4: 'consistentemente inteligible y preciso para el nivel',
       },
     },
-    jsonObjectFallback: true,
   });
   const judged = normalizePronunciationJudgment(
     rawJudgment,
@@ -947,7 +893,7 @@ export async function improveStudentInstructionWithAI({
     ),
     warnings: cleanList(suggestion.warnings, 8, 500),
     generatedBy: {
-      provider: 'groq',
+      provider: 'opencode-zen',
       model,
       promptVersion: PROMPT_VERSION,
     },
@@ -1242,7 +1188,7 @@ function validateFindings(findings, tokens, uncertainTokenIndices = []) {
       transcriptEnd: finding.tokenEnd,
       certainty:
         typeof finding.certainty === 'number' ? finding.certainty : null,
-      source: 'gpt-oss-evidence-extractor',
+      source: 'deepseek-v4-evidence-extractor',
     }));
 }
 
@@ -1648,8 +1594,8 @@ export async function runDoubleLinguisticJudging({
       promptVersion: PROMPT_VERSION,
     };
   }
-  // Los contextos siguen siendo independientes, pero se ejecutan en serie
-  // para no duplicar el consumo instantáneo del límite TPM de Groq.
+  // Los contextos siguen siendo independientes y se ejecutan en serie para
+  // mantener un uso predecible del proveedor lingüístico.
   const analytic = await runJudge({
     client,
     model,
