@@ -1495,6 +1495,7 @@ export function createApp({
         path: request.path,
         status,
         code: error.code ?? 'ERROR_INTERNO',
+        details: error.details ?? null,
       }),
     );
     response.status(status).json({

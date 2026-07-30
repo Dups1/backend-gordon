@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   extractLinguisticEvidence,
+  improveStudentInstructionWithAI,
   judgePronunciationFromPhonetics,
   resetLinguisticGovernorForTests,
   runDoubleLinguisticJudging,
@@ -206,6 +207,71 @@ test('usa JSON Object Mode y valida localmente el juez fonético', async () => {
   assert.equal(outputPayload.data.observedIpa, undefined);
   assert.equal(outputPayload.outputSchema.required.includes('band'), true);
   assert.equal(client.pendingResponses, 0);
+});
+
+test('recupera una mejora de consigna cuando OpenCode entrega contenido vacío', async () => {
+  const calls = [];
+  const improvement = {
+    improvedInstruction:
+      'Describe una experiencia pasada y explica qué pudiste hacer.',
+    detectedAudience: 'student',
+    summary: 'La consigna quedó dirigida al estudiante.',
+    preservedRequirements: ['Usar pasado simple', 'Usar could'],
+    warnings: [],
+  };
+  const client = {
+    chat: {
+      completions: {
+        async create(options) {
+          calls.push(options);
+          if (calls.length === 1) {
+            return {
+              choices: [
+                {
+                  finish_reason: 'length',
+                  message: { content: null },
+                },
+              ],
+              usage: { completion_tokens: options.max_tokens },
+            };
+          }
+          return {
+            choices: [
+              {
+                finish_reason: 'stop',
+                message: {
+                  content: [
+                    {
+                      type: 'text',
+                      text: `\`\`\`json\n${JSON.stringify(improvement)}\n\`\`\``,
+                    },
+                  ],
+                },
+              },
+            ],
+          };
+        },
+      },
+    },
+  };
+
+  const result = await improveStudentInstructionWithAI({
+    client,
+    model: 'deepseek-v4-flash',
+    spec: {
+      mode: 'spontaneous',
+      targetLocale: 'en-US',
+      cefr: 'B1',
+      instruction: 'Revisa que use pasado y could.',
+      communicativePurpose: 'Narrar una experiencia',
+    },
+  });
+
+  assert.equal(result.improvedInstruction, improvement.improvedInstruction);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].response_format.type, 'json_object');
+  assert.equal(calls[1].response_format, undefined);
+  assert.ok(calls[1].max_tokens > calls[0].max_tokens);
 });
 
 test('una muestra breve sigue siendo evidencia válida para las tres dimensiones', async () => {

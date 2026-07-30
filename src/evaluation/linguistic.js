@@ -302,24 +302,102 @@ const instructionImprovementSchema = {
   ],
 };
 
+function structuredContentText(content) {
+  if (typeof content === 'string') return content.trim();
+  if (!Array.isArray(content)) return '';
+  return content
+    .map((part) => {
+      if (typeof part === 'string') return part;
+      if (typeof part?.text === 'string') return part.text;
+      if (typeof part?.text?.value === 'string') return part.text.value;
+      if (typeof part?.content === 'string') return part.content;
+      return '';
+    })
+    .filter(Boolean)
+    .join('\n')
+    .trim();
+}
+
+function firstJsonObject(content) {
+  let start = -1;
+  let depth = 0;
+  let insideString = false;
+  let escaped = false;
+  for (let index = 0; index < content.length; index++) {
+    const character = content[index];
+    if (insideString) {
+      if (escaped) {
+        escaped = false;
+      } else if (character === '\\') {
+        escaped = true;
+      } else if (character === '"') {
+        insideString = false;
+      }
+      continue;
+    }
+    if (character === '"') {
+      insideString = true;
+      continue;
+    }
+    if (character === '{') {
+      if (depth === 0) start = index;
+      depth++;
+    } else if (character === '}' && depth > 0) {
+      depth--;
+      if (depth === 0 && start >= 0) {
+        return content.slice(start, index + 1);
+      }
+    }
+  }
+  return null;
+}
+
 function parseStructured(response, name) {
-  const content = response?.choices?.[0]?.message?.content;
-  if (typeof content !== 'string' || !content.trim()) {
+  const choice = response?.choices?.[0];
+  const message = choice?.message;
+  if (
+    message?.parsed &&
+    typeof message.parsed === 'object' &&
+    !Array.isArray(message.parsed)
+  ) {
+    return message.parsed;
+  }
+  const content = structuredContentText(message?.content);
+  if (!content) {
     throw new EvaluationError(
       502,
       `El modelo no devolvió ${name}.`,
       'LINGUISTIC_MODEL_EMPTY',
+      {
+        stage: name,
+        finishReason: choice?.finish_reason ?? null,
+        contentType: Array.isArray(message?.content)
+          ? 'array'
+          : typeof message?.content,
+        completionTokens: response?.usage?.completion_tokens ?? null,
+      },
     );
   }
-  try {
-    return JSON.parse(content);
-  } catch {
-    throw new EvaluationError(
-      502,
-      `El modelo devolvió ${name} inválido.`,
-      'LINGUISTIC_MODEL_INVALID_JSON',
-    );
+  const candidates = [content];
+  const extracted = firstJsonObject(content);
+  if (extracted && extracted !== content) candidates.push(extracted);
+  for (const candidate of candidates) {
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      // Continúa con el objeto JSON extraído cuando el modelo agregó texto.
+    }
   }
+  throw new EvaluationError(
+    502,
+    `El modelo devolvió ${name} inválido.`,
+    'LINGUISTIC_MODEL_INVALID_JSON',
+    {
+      stage: name,
+      finishReason: choice?.finish_reason ?? null,
+      completionTokens: response?.usage?.completion_tokens ?? null,
+    },
+  );
 }
 
 function retryableProviderError(error) {
@@ -606,7 +684,7 @@ async function callStructured({
   payload,
   maxTokens = 2000,
 }) {
-  const request = {
+  const baseRequest = {
     model,
     temperature: 0,
     max_tokens: maxTokens,
@@ -623,27 +701,81 @@ async function callStructured({
     ],
     response_format: { type: 'json_object' },
   };
-  const requestEstimate = estimateLinguisticRequestTokens(
-    request,
-    maxTokens,
-  );
 
   return withLinguisticQueue(() =>
     withCircuitBreaker('opencode-linguistic', async () => {
-      let response;
       let lastError;
+      let lastRequestEstimate = estimateLinguisticRequestTokens(
+        baseRequest,
+        maxTokens,
+      );
+      let formatRecovery = false;
       for (let attempt = 0; attempt < 3; attempt++) {
+        const completionBudget = formatRecovery
+          ? Math.min(8000, Math.max(maxTokens + 1200, maxTokens * 2))
+          : maxTokens;
+        const request = formatRecovery
+          ? {
+              ...baseRequest,
+              max_tokens: completionBudget,
+              messages: [
+                {
+                  role: 'system',
+                  content:
+                    `${system}\n\nDevuelve inmediatamente un único objeto JSON válido, sin razonamiento, explicación ni cercas Markdown.`,
+                },
+                baseRequest.messages[1],
+              ],
+              response_format: undefined,
+            }
+          : baseRequest;
+        lastRequestEstimate = estimateLinguisticRequestTokens(
+          request,
+          completionBudget,
+        );
         try {
           await reserveLinguisticTokens({
             model,
-            ...requestEstimate,
+            ...lastRequestEstimate,
           });
-          response = await client.chat.completions.create(
+          const response = await client.chat.completions.create(
             request,
             { timeout: 120_000, maxRetries: 0 },
           );
-          break;
+          try {
+            return parseStructured(response, schemaName);
+          } catch (error) {
+            lastError = error;
+            const recoverableFormatError = [
+              'LINGUISTIC_MODEL_EMPTY',
+              'LINGUISTIC_MODEL_INVALID_JSON',
+            ].includes(error?.code);
+            if (
+              recoverableFormatError &&
+              !formatRecovery &&
+              attempt < 2
+            ) {
+              formatRecovery = true;
+              continue;
+            }
+            error.details = {
+              ...(error.details ?? {}),
+              ...lastRequestEstimate,
+              maxCompletionTokens: completionBudget,
+              formatRecovery,
+            };
+            throw error;
+          }
         } catch (error) {
+          if (
+            error instanceof EvaluationError &&
+            [
+              'LINGUISTIC_MODEL_EMPTY',
+              'LINGUISTIC_MODEL_INVALID_JSON',
+            ].includes(error.code)
+          ) {
+            throw error;
+          }
           lastError = error;
           const retryable = retryableProviderError(error);
           if (!retryable || attempt === 2) break;
@@ -652,16 +784,16 @@ async function callStructured({
           );
         }
       }
-      if (!response) {
-        const failure = providerFailure(lastError, schemaName);
-        failure.details = {
-          ...(failure.details ?? {}),
-          ...requestEstimate,
-          maxCompletionTokens: maxTokens,
-        };
-        throw failure;
-      }
-      return parseStructured(response, schemaName);
+      const failure = providerFailure(lastError, schemaName);
+      failure.details = {
+        ...(failure.details ?? {}),
+        ...lastRequestEstimate,
+        maxCompletionTokens: formatRecovery
+          ? Math.min(8000, Math.max(maxTokens + 1200, maxTokens * 2))
+          : maxTokens,
+        formatRecovery,
+      };
+      throw failure;
     }),
   );
 }
@@ -848,7 +980,7 @@ export async function improveStudentInstructionWithAI({
     model,
     schema: instructionImprovementSchema,
     schemaName: 'gordon_instruction_improvement',
-    maxTokens: 1000,
+    maxTokens: 4000,
     system: INTERNAL_PROMPTS.instructionImprover,
     payload: { spec },
   });
