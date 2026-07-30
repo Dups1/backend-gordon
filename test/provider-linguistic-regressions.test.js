@@ -161,8 +161,14 @@ test('convierte fonemas en texto literal sin recibir Whisper ni una frase espera
   const client = structuredClient([
     {
       segments: [
-        { id: 'p0', written: 'thapen' },
-        { id: 'p1', written: 'rou' },
+        {
+          id: 'p0',
+          tokens: [{ ipa: 'ðæpən', written: 'dhapen' }],
+        },
+        {
+          id: 'p1',
+          tokens: [{ ipa: 'ɹoʊ', written: 'rou' }],
+        },
       ],
     },
   ]);
@@ -179,11 +185,11 @@ test('convierte fonemas en texto literal sin recibir Whisper ni una frase espera
     },
   });
 
-  assert.equal(result.text, 'thapen rou');
+  assert.equal(result.text, 'dhapen rou');
   assert.equal(result.usesWhisperReference, false);
   assert.equal(
     result.methodId,
-    'deepseek-phoneme-literal-transcription-v1',
+    'deepseek-phoneme-literal-transcription-v2',
   );
   const request = JSON.parse(client.calls[0].messages[1].content).data;
   assert.deepEqual(request, {
@@ -197,6 +203,90 @@ test('convierte fonemas en texto literal sin recibir Whisper ni una frase espera
   assert.equal(JSON.stringify(request).includes('Whisper'), false);
   assert.equal(JSON.stringify(request).includes('instruction'), false);
   assert.match(client.calls[0].messages[0].content, /no corrijas/i);
+});
+
+test('infiere espacios sin corregir un fonema pronunciado incorrectamente', async () => {
+  const client = structuredClient([
+    {
+      segments: [
+        {
+          id: 'p0',
+          tokens: [
+            { ipa: 'fəloʊ', written: 'fello' },
+            { ipa: 'maɪ', written: 'my' },
+            { ipa: 'neɪm', written: 'name' },
+            { ipa: 'ɪz', written: 'is' },
+          ],
+        },
+      ],
+    },
+  ]);
+
+  const result = await transcribePhonemesLiterally({
+    client,
+    model: 'deepseek-v4-flash',
+    targetLocale: 'en-US',
+    phoneticEvidence: {
+      transcript: 'fəloʊmaɪneɪmɪz',
+      model: 'wav2vec2-phoneme-en',
+      confidence: 0.83,
+      events: [],
+    },
+  });
+
+  assert.equal(result.text, 'fello my name is');
+  assert.equal(result.text.includes('hello'), false);
+  assert.deepEqual(
+    result.segments[0].tokens.map((token) => token.ipa).join(''),
+    'fəloʊmaɪneɪmɪz',
+  );
+});
+
+test('reintenta cuando DeepSeek concatena una frase como una sola palabra', async () => {
+  const ipa = 'həloʊmaɪneɪmɪzwɛn';
+  const client = structuredClient([
+    {
+      segments: [
+        {
+          id: 'p0',
+          tokens: [{ ipa, written: 'hellomynameis' }],
+        },
+      ],
+    },
+    {
+      segments: [
+        {
+          id: 'p0',
+          tokens: [
+            { ipa: 'həloʊ', written: 'hello' },
+            { ipa: 'maɪ', written: 'my' },
+            { ipa: 'neɪm', written: 'name' },
+            { ipa: 'ɪz', written: 'is' },
+            { ipa: 'wɛn', written: 'when' },
+          ],
+        },
+      ],
+    },
+  ]);
+
+  const result = await transcribePhonemesLiterally({
+    client,
+    model: 'deepseek-v4-flash',
+    targetLocale: 'en-US',
+    phoneticEvidence: {
+      transcript: ipa,
+      model: 'wav2vec2-phoneme-en',
+      confidence: 0.83,
+      events: [],
+    },
+  });
+
+  assert.equal(result.text, 'hello my name is when');
+  assert.equal(client.calls.length, 2);
+  assert.match(
+    client.calls[1].messages[0].content,
+    /concatenó una frase completa/i,
+  );
 });
 
 test('usa JSON Object Mode y valida localmente el juez fonético', async () => {

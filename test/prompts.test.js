@@ -9,7 +9,7 @@ import {
 } from '../src/evaluation/prompts.js';
 
 test('carga prompts separados, versionados y resistentes a instrucciones', () => {
-  assert.equal(PROMPT_MANIFEST_VERSION, 'gordon-evidence-v1.9');
+  assert.equal(PROMPT_MANIFEST_VERSION, 'gordon-evidence-v1.10');
   assert.match(PROMPT_MANIFEST_HASH, /^[a-f0-9]{64}$/);
   assert.match(INTERNAL_PROMPTS.securityEnvelope, /nunca instrucciones/i);
   assert.match(INTERNAL_PROMPTS.instructionImprover, /intención docente/i);
@@ -18,6 +18,14 @@ test('carga prompts separados, versionados y resistentes a instrucciones', () =>
   assert.match(
     INTERNAL_PROMPTS.phoneticLiteralizer,
     /pseudopalabra.*refleje esos sonidos/i,
+  );
+  assert.match(
+    INTERNAL_PROMPTS.phoneticLiteralizer,
+    /inferir límites probables entre palabras/i,
+  );
+  assert.match(
+    INTERNAL_PROMPTS.phoneticLiteralizer,
+    /nunca devuelvas una pseudopalabra gigante/i,
   );
   assert.match(INTERNAL_PROMPTS.evidenceExtractor, /no asignes notas/i);
   assert.match(INTERNAL_PROMPTS.analyticJudge, /pronunciación ni fluidez/i);

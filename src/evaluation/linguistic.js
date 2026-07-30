@@ -316,9 +316,22 @@ const phoneticLiteralizationSchema = {
         additionalProperties: false,
         properties: {
           id: { type: 'string' },
-          written: { type: 'string' },
+          tokens: {
+            type: 'array',
+            minItems: 1,
+            maxItems: 96,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                ipa: { type: 'string', minLength: 1, maxLength: 20 },
+                written: { type: 'string', minLength: 1, maxLength: 32 },
+              },
+              required: ['ipa', 'written'],
+            },
+          },
         },
-        required: ['id', 'written'],
+        required: ['id', 'tokens'],
       },
     },
   },
@@ -937,15 +950,81 @@ function literalPhoneticSegments(phoneticEvidence) {
       ? phoneticEvidence.transcript.trim()
       : '';
   if (!transcript) return [];
-  return transcript
+  const source = transcript
     .split(/\s*·+\s*/u)
     .map((ipa) => ipa.trim())
-    .filter(Boolean)
-    .slice(0, 512)
-    .map((ipa, index) => ({
-      id: `p${index}`,
-      ipa: ipa.slice(0, 240),
-    }));
+    .filter(Boolean);
+  const chunks = [];
+  for (const ipa of source) {
+    const characters = Array.from(ipa);
+    for (let offset = 0; offset < characters.length; offset += 360) {
+      chunks.push(characters.slice(offset, offset + 360).join(''));
+      if (chunks.length === 512) break;
+    }
+    if (chunks.length === 512) break;
+  }
+  return chunks.map((ipa, index) => ({
+    id: `p${index}`,
+    ipa,
+  }));
+}
+
+function normalizeIpa(value) {
+  return typeof value === 'string'
+    ? value.normalize('NFC').replace(/\s+/gu, '')
+    : '';
+}
+
+function normalizeLiteralizedSegments(raw, sourceSegments) {
+  const candidates = Array.isArray(raw?.segments) ? raw.segments : [];
+  const byId = new Map();
+  for (const candidate of candidates) {
+    if (
+      typeof candidate?.id !== 'string' ||
+      byId.has(candidate.id)
+    ) {
+      continue;
+    }
+    byId.set(candidate.id, candidate);
+  }
+
+  const normalized = [];
+  for (const source of sourceSegments) {
+    const candidate = byId.get(source.id);
+    if (!candidate || !Array.isArray(candidate.tokens)) return null;
+    const tokens = candidate.tokens
+      .map((token) => ({
+        ipa: typeof token?.ipa === 'string' ? token.ipa.trim() : '',
+        written:
+          typeof token?.written === 'string'
+            ? token.written.trim()
+            : '',
+      }))
+      .filter((token) => token.ipa && token.written);
+    if (!tokens.length || tokens.length !== candidate.tokens.length) {
+      return null;
+    }
+    if (
+      tokens.some(
+        (token) =>
+          /\s/u.test(token.written) ||
+          Array.from(token.written).length > 32 ||
+          Array.from(normalizeIpa(token.ipa)).length > 14,
+      )
+    ) {
+      return null;
+    }
+    const reconstructedIpa = tokens
+      .map((token) => normalizeIpa(token.ipa))
+      .join('');
+    if (reconstructedIpa !== normalizeIpa(source.ipa)) return null;
+    normalized.push({
+      ...source,
+      tokens,
+      written: tokens.map((token) => token.written).join(' '),
+    });
+  }
+  return normalized;
 }
 
 export async function transcribePhonemesLiterally({
@@ -956,49 +1035,50 @@ export async function transcribePhonemesLiterally({
 }) {
   const sourceSegments = literalPhoneticSegments(phoneticEvidence);
   if (!sourceSegments.length) return null;
-  const raw = await callStructured({
-    client,
-    model,
-    schema: phoneticLiteralizationSchema,
-    schemaName: 'gordon_literal_transcript_from_phonemes',
-    maxTokens: 4000,
-    system: INTERNAL_PROMPTS.phoneticLiteralizer,
-    payload: {
-      targetLocale,
-      acousticModel: phoneticEvidence.model ?? null,
-      segments: sourceSegments,
-    },
-  });
-  const validIds = new Set(sourceSegments.map((segment) => segment.id));
-  const renderedById = new Map(
-    (Array.isArray(raw?.segments) ? raw.segments : [])
-      .filter(
-        (segment) =>
-          validIds.has(segment?.id) &&
-          typeof segment?.written === 'string' &&
-          segment.written.trim(),
-      )
-      .map((segment) => [
-        segment.id,
-        segment.written.trim().replace(/\s+/g, ' ').slice(0, 240),
-      ]),
+  const payload = {
+    targetLocale,
+    acousticModel: phoneticEvidence.model ?? null,
+    segments: sourceSegments,
+  };
+  const requestLiteralization = (system, schemaName) =>
+    callStructured({
+      client,
+      model,
+      schema: phoneticLiteralizationSchema,
+      schemaName,
+      maxTokens: 8000,
+      system,
+      payload,
+    });
+
+  let raw = await requestLiteralization(
+    INTERNAL_PROMPTS.phoneticLiteralizer,
+    'gordon_literal_transcript_from_phonemes',
   );
-  if (!renderedById.size) {
+  let segments = normalizeLiteralizedSegments(raw, sourceSegments);
+  if (!segments) {
+    raw = await requestLiteralization(
+      `${INTERNAL_PROMPTS.phoneticLiteralizer}\n\nEl intento anterior no conservó todo el IPA o concatenó una frase completa como una sola pseudopalabra. Esta vez divide cada bloque largo en palabras o pseudopalabras cortas y verifica que la concatenación de los campos ipa sea idéntica al segmento de entrada.`,
+      'gordon_literal_transcript_from_phonemes_repair',
+    );
+    segments = normalizeLiteralizedSegments(raw, sourceSegments);
+  }
+  if (!segments) {
     throw new EvaluationError(
       502,
-      'El modelo no convirtió los fonemas en texto literal.',
+      'El modelo no separó los fonemas en texto literal verificable.',
       'PHONETIC_LITERAL_TRANSCRIPT_INVALID',
+      {
+        sourceSegments: sourceSegments.length,
+        requiresExactIpaCoverage: true,
+        requiresWordSegmentation: true,
+      },
     );
   }
-  const segments = sourceSegments.map((segment) => ({
-    ...segment,
-    written:
-      renderedById.get(segment.id) ?? `⟦/${segment.ipa}/⟧`,
-  }));
   return {
     text: segments.map((segment) => segment.written).join(' '),
     segments,
-    methodId: 'deepseek-phoneme-literal-transcription-v1',
+    methodId: 'deepseek-phoneme-literal-transcription-v2',
     provider: 'opencode-zen',
     model,
     promptVersion: PROMPT_VERSION,
