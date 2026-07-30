@@ -134,6 +134,49 @@ test('juzga IPA con inteligibilidad y contexto de lengua materna', async () => {
   assert.equal(client.pendingResponses, 0);
 });
 
+test('una muestra breve sigue siendo evidencia válida para las tres dimensiones', async () => {
+  const client = structuredClient([
+    {
+      sufficientEvidence: true,
+      taskCoverage: 0.2,
+      summary: 'La muestra es breve, pero contiene lenguaje evaluable.',
+      findings: ['communication', 'grammar', 'vocabulary'].map(
+        (dimension) => ({
+          id: `${dimension}-brief`,
+          dimension,
+          type: 'uncertainty',
+          claim: 'La única palabra disponible aporta evidencia limitada.',
+          tokenStart: 0,
+          tokenEnd: 0,
+          quote: 'Hello',
+          correction: '',
+          certainty: 0.35,
+        }),
+      ),
+    },
+  ]);
+
+  const evidence = await extractLinguisticEvidence({
+    client,
+    model: 'test-model',
+    rubric: { spec: { mode: 'spontaneous' } },
+    transcript: 'Hello',
+    secondaryTranscript: '',
+    quality: {
+      metrics: {
+        durationSeconds: 1.2,
+        voicedSeconds: 0.7,
+      },
+    },
+    providerDisagreement: null,
+  });
+
+  assert.equal(evidence.sufficientEvidence, true);
+  assert.equal(evidence.sufficiency.recommendedSample, false);
+  assert.equal(evidence.findings.length, 3);
+  assert.equal(client.pendingResponses, 0);
+});
+
 test('una muestra de 24.8 s con voz y palabras suficientes llega al extractor', async () => {
   const client = structuredClient([
     {
@@ -461,7 +504,11 @@ test('conserva la extracción válida si falla una reparación complementaria', 
   });
 
   assert.equal(attempts, 2);
-  assert.equal(evidence.findings.length, 1);
+  assert.equal(evidence.findings.length, 3);
+  assert.deepEqual(
+    [...new Set(evidence.findings.map((finding) => finding.dimension))].sort(),
+    ['communication', 'grammar', 'vocabulary'],
+  );
   assert.equal(evidence.extractorRepairAttempted, true);
   assert.equal(evidence.extractorRepaired, false);
   assert.equal(
@@ -648,11 +695,8 @@ test('conserva dimensiones acordadas si falla la adjudicación', async () => {
     },
   });
 
-  assert.equal(result.dimensions.communication.status, 'insufficientEvidence');
-  assert.equal(
-    result.dimensions.communication.reasonCode,
-    'LINGUISTIC_REQUEST_TOO_LARGE',
-  );
+  assert.equal(result.dimensions.communication.status, 'scored');
+  assert.equal(result.dimensions.communication.reviewRequired, true);
   assert.equal(result.dimensions.grammar.status, 'scored');
   assert.equal(result.dimensions.vocabulary.status, 'scored');
   assert.equal(result.adjudicated, false);

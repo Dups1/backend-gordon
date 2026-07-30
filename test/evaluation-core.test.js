@@ -23,7 +23,11 @@ import {
   dimensionResult,
   verifyRubricToken,
 } from '../src/evaluation/domain.js';
-import { runAssessment } from '../src/evaluation/engine.js';
+import {
+  pronunciationFromPhoneticJudge,
+  provisionalFluencyFromTimings,
+  runAssessment,
+} from '../src/evaluation/engine.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -196,6 +200,52 @@ test('no limita valores inválidos ni redistribuye pesos faltantes', () => {
   );
   assert.equal(overall.score, null);
   assert.deepEqual(overall.missingDimensions, ['fluency']);
+});
+
+test('puntúa fluidez con cualquier secuencia fonética temporizada', () => {
+  const result = provisionalFluencyFromTimings({
+    phoneticEvidence: {
+      confidence: 0.31,
+      events: [
+        { phoneme: 'h', startSec: 0, endSec: 0.12 },
+        { phoneme: 'ə', startSec: 0.14, endSec: 0.28 },
+        { phoneme: 'l', startSec: 0.72, endSec: 0.84 },
+        { phoneme: 'oʊ', startSec: 0.86, endSec: 1.04 },
+      ],
+    },
+    whisperEvidence: { text: 'hello' },
+    quality: {
+      metrics: { durationSeconds: 1.2, voicedSeconds: 0.9 },
+    },
+    constructScope: 'productive_speaking',
+  });
+
+  assert.equal(result.status, 'scored');
+  assert.equal(result.reliability, 'low');
+  assert.equal(result.methodId, 'wav2vec2-timing-provisional-v1');
+  assert.ok(result.score >= 0 && result.score <= 100);
+});
+
+test('no descarta pronunciación cuando el juez considera limitada la confianza', () => {
+  const result = pronunciationFromPhoneticJudge({
+    judged: {
+      status: 'insufficientEvidence',
+      band: 0,
+      rationale: 'La confianza CTC es moderada.',
+      observations: [],
+    },
+    error: null,
+    phoneticEvidence: {
+      transcript: 'ðæpən ɹoʊt',
+      confidence: 0.42,
+    },
+    constructScope: 'productive_speaking',
+  });
+
+  assert.equal(result.status, 'scored');
+  assert.equal(result.score, 25);
+  assert.equal(result.reliability, 'low');
+  assert.match(result.limitations.join(' '), /en lugar de descartarse/i);
 });
 
 test('el quality gate distingue silencio de voz y conserva decimales', async () => {
@@ -408,6 +458,18 @@ test('expone el flujo v2 síncrono con confirmación previa y audio real', async
     .field('phoneticTranscript', 'ðæpən ɹoʊt')
     .field('phoneticConfidence', '0.702')
     .field('phoneticModel', 'wav2vec2-phoneme-en')
+    .field(
+      'phoneticEvents',
+      JSON.stringify([
+        {
+          type: 'phoneme',
+          phoneme: 'ð',
+          startSec: 0.1,
+          endSec: 0.2,
+          confidence: 0.61,
+        },
+      ]),
+    )
     .attach('audio', wavPcm16({ durationSeconds: 1 }), {
       filename: 'student.wav',
       contentType: 'audio/wav',
@@ -422,6 +484,15 @@ test('expone el flujo v2 síncrono con confirmación previa y audio real', async
     transcript: 'ðæpən ɹoʊt',
     confidence: 0.702,
     model: 'wav2vec2-phoneme-en',
+    events: [
+      {
+        type: 'phoneme',
+        phoneme: 'ð',
+        startSec: 0.1,
+        endSec: 0.2,
+        confidence: 0.61,
+      },
+    ],
   });
   const completionLog = logs.find(
     (entry) => entry.event === 'assessment_completed',

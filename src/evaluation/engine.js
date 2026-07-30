@@ -10,6 +10,7 @@ import {
   newAssessmentId,
   normalizeTokens,
   probabilitiesForBand,
+  probabilitiesForScore,
 } from './domain.js';
 import {
   extractLinguisticEvidence,
@@ -93,7 +94,7 @@ function unavailableAcoustic(id, constructScope) {
   });
 }
 
-function pronunciationFromPhoneticJudge({
+export function pronunciationFromPhoneticJudge({
   judged,
   error,
   phoneticEvidence,
@@ -112,20 +113,11 @@ function pronunciationFromPhoneticJudge({
     });
   }
   if (!judged) return unavailableAcoustic('pronunciation', constructScope);
-  if (judged.status !== 'scored' || judged.band === 0) {
-    return dimensionResult({
-      id: 'pronunciation',
-      status: 'insufficientEvidence',
-      methodId: 'gpt-oss-phonetic-judge-v1',
-      reliability: 'low',
-      reasonCode: 'PHONETIC_EVIDENCE_INSUFFICIENT',
-      evidence: [],
-      limitations: [judged.rationale],
-      constructScope,
-      reviewRequired: true,
-    });
-  }
-  const probabilities = probabilitiesForBand(judged.band, 0.3);
+  const band =
+    Number.isInteger(judged.band) && judged.band >= 1 && judged.band <= 4
+      ? judged.band
+      : 1;
+  const probabilities = probabilitiesForBand(band, 0.3);
   const score = expectedScore(probabilities);
   const reliability =
     typeof phoneticEvidence?.confidence === 'number' &&
@@ -157,7 +149,124 @@ function pronunciationFromPhoneticJudge({
     })),
     limitations: [
       judged.rationale,
+      ifPronunciationWasForced(judged),
       'Resultado provisional: la secuencia IPA local y el juez todavía requieren calibración humana.',
+    ].filter(Boolean),
+    constructScope,
+    reviewRequired: true,
+  });
+}
+
+function ifPronunciationWasForced(judged) {
+  return judged.status === 'scored' && judged.band >= 1
+    ? null
+    : 'La evidencia disponible se puntuó con confiabilidad baja en lugar de descartarse.';
+}
+
+function clampScore(value) {
+  return Math.max(0, Math.min(100, value));
+}
+
+export function provisionalFluencyFromTimings({
+  phoneticEvidence,
+  whisperEvidence,
+  quality,
+  constructScope,
+}) {
+  const durationSeconds = Number(quality?.metrics?.durationSeconds);
+  const voicedSeconds = Number(quality?.metrics?.voicedSeconds);
+  const events = (Array.isArray(phoneticEvidence?.events)
+    ? phoneticEvidence.events
+    : []
+  )
+    .filter(
+      (event) =>
+        Number.isFinite(event?.startSec) &&
+        Number.isFinite(event?.endSec) &&
+        event.endSec >= event.startSec,
+    )
+    .sort((a, b) => a.startSec - b.startSec);
+  let score;
+  let claim;
+  let methodId;
+  if (events.length >= 2) {
+    const articulatedSeconds = events.reduce(
+      (total, event) => total + Math.max(0, event.endSec - event.startSec),
+      0,
+    );
+    let pauseSeconds = 0;
+    let pauseCount = 0;
+    for (let index = 1; index < events.length; index++) {
+      const gap = Math.max(0, events[index].startSec - events[index - 1].endSec);
+      if (gap >= 0.25) {
+        pauseSeconds += gap;
+        pauseCount++;
+      }
+    }
+    const phonemesPerSecond =
+      articulatedSeconds > 0 ? events.length / articulatedSeconds : 0;
+    const paceScore = clampScore(100 - Math.abs(phonemesPerSecond - 12) * 8);
+    const continuityBase =
+      Number.isFinite(durationSeconds) && durationSeconds > 0
+        ? 1 - pauseSeconds / durationSeconds
+        : articulatedSeconds / Math.max(0.001, articulatedSeconds + pauseSeconds);
+    const continuityScore = clampScore(continuityBase * 100);
+    score = clampScore(paceScore * 0.45 + continuityScore * 0.55);
+    claim =
+      `${events.length} fonemas temporizados; ritmo ${phonemesPerSecond.toFixed(1)} fonemas/s; ` +
+      `${pauseCount} pausas internas de al menos 0.25 s.`;
+    methodId = 'wav2vec2-timing-provisional-v1';
+  } else {
+    const words = normalizeTokens(whisperEvidence?.text ?? '');
+    if (
+      words.length === 0 ||
+      !Number.isFinite(durationSeconds) ||
+      durationSeconds <= 0
+    ) {
+      return unavailableAcoustic('fluency', constructScope);
+    }
+    const effectiveVoice =
+      Number.isFinite(voicedSeconds) && voicedSeconds > 0
+        ? voicedSeconds
+        : durationSeconds;
+    const wordsPerMinute = (words.length / effectiveVoice) * 60;
+    const paceScore = clampScore(100 - Math.abs(wordsPerMinute - 130) * 0.8);
+    const continuityScore = clampScore((effectiveVoice / durationSeconds) * 100);
+    score = clampScore(paceScore * 0.55 + continuityScore * 0.45);
+    claim =
+      `${words.length} palabras en ${effectiveVoice.toFixed(1)} s de voz; ` +
+      `ritmo aproximado ${wordsPerMinute.toFixed(0)} palabras/min.`;
+    methodId = 'whisper-timing-provisional-v1';
+  }
+  const confidence = phoneticEvidence?.confidence;
+  const reliability =
+    typeof confidence === 'number' && confidence >= 0.65 ? 'medium' : 'low';
+  const halfWidth = reliability === 'medium' ? 18 : 25;
+  return dimensionResult({
+    id: 'fluency',
+    status: 'scored',
+    score,
+    rawScore: score,
+    probabilities: probabilitiesForScore(score),
+    interval90: {
+      low: Math.max(0, score - halfWidth),
+      high: Math.min(100, score + halfWidth),
+    },
+    reliability,
+    methodId,
+    evidence: [
+      {
+        id: 'fluency-timing-summary',
+        kind: 'timingSummary',
+        claim,
+        value: score,
+        unit: '0-100',
+        source:
+          events.length >= 2 ? 'wav2vec2-local' : 'whisper+audio-quality',
+      },
+    ],
+    limitations: [
+      'Puntuación provisional basada en continuidad y ritmo observables; la evidencia parcial reduce la confiabilidad, no elimina el indicador.',
     ],
     constructScope,
     reviewRequired: true,
@@ -516,7 +625,12 @@ export async function runAssessment({
       rubric,
       providerError: linguisticError,
     }),
-    fluency: unavailableAcoustic('fluency', scopes.fluency),
+    fluency: provisionalFluencyFromTimings({
+      phoneticEvidence,
+      whisperEvidence,
+      quality,
+      constructScope: scopes.fluency,
+    }),
   };
   const overall = calculateOverall(
     dimensions,

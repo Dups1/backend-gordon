@@ -741,10 +741,49 @@ function evidenciaFoneticaDesdeMultipart(body) {
     parsedConfidence <= 1
       ? parsedConfidence
       : null;
+  let events = [];
+  const serializedEvents = textoOpcional(body?.phoneticEvents);
+  if (serializedEvents) {
+    try {
+      const parsedEvents = JSON.parse(serializedEvents);
+      if (Array.isArray(parsedEvents)) {
+        events = parsedEvents
+          .slice(0, 12000)
+          .map((event) => {
+            const startSec = Number(event?.startSec);
+            const endSec = Number(event?.endSec);
+            const eventConfidence = Number(event?.confidence);
+            return {
+              type: textoOpcional(event?.type).slice(0, 40) || 'phoneme',
+              phoneme: textoOpcional(event?.phoneme).slice(0, 30),
+              startSec:
+                Number.isFinite(startSec) && startSec >= 0 ? startSec : null,
+              endSec:
+                Number.isFinite(endSec) && endSec >= startSec ? endSec : null,
+              confidence:
+                Number.isFinite(eventConfidence) &&
+                eventConfidence >= 0 &&
+                eventConfidence <= 1
+                  ? eventConfidence
+                  : null,
+            };
+          })
+          .filter(
+            (event) =>
+              event.phoneme &&
+              event.startSec !== null &&
+              event.endSec !== null,
+          );
+      }
+    } catch {
+      events = [];
+    }
+  }
   return {
     transcript,
     confidence,
     model: textoOpcional(body?.phoneticModel).slice(0, 200) || null,
+    events,
   };
 }
 
