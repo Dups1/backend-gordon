@@ -24,6 +24,12 @@ import {
 import { prepareAudio } from './evaluation/audio.js';
 import { runAssessment } from './evaluation/engine.js';
 import {
+  PHONEME_API_KEY,
+  PHONEME_ENDPOINT,
+  PHONEME_TIMEOUT_MS,
+  requestRemotePhonemeEvidence,
+} from './evaluation/phonetics.js';
+import {
   enhanceRubricDraftWithAI,
   improveStudentInstructionWithAI,
 } from './evaluation/linguistic.js';
@@ -879,6 +885,10 @@ export function createApp({
   ejecutarEvaluacion = runAssessment,
   compilarRubrica = enhanceRubricDraftWithAI,
   mejorarConsigna = improveStudentInstructionWithAI,
+  phonemeEndpoint = PHONEME_ENDPOINT,
+  phonemeApiKey = PHONEME_API_KEY,
+  phonemeTimeoutMs = PHONEME_TIMEOUT_MS,
+  solicitarEvidenciaFonetica = requestRemotePhonemeEvidence,
   almacenamientoPiloto = createPilotStorage(),
   rubricSigningSecret,
   maxConcurrentAssessments = Number.parseInt(
@@ -954,6 +964,7 @@ export function createApp({
       service: 'backend-gordon',
       model: GROQ_MODEL,
       linguisticModel: LINGUISTIC_MODEL,
+      phonemeEndpointConfigured: Boolean(phonemeEndpoint),
       promptVersion: PROMPT_MANIFEST_VERSION,
     });
   });
@@ -965,6 +976,7 @@ export function createApp({
         linguisticClient || process.env.OPENCODE_API_KEY?.trim(),
       ),
       ffmpeg: Boolean(ffmpegPath),
+      phonemeEndpoint: Boolean(phonemeEndpoint),
       rubricSigningSecret: Boolean(
         rubricSigningSecret || process.env.RUBRIC_SIGNING_SECRET?.trim(),
       ),
@@ -975,6 +987,7 @@ export function createApp({
       checks.groq &&
       checks.openCode &&
       checks.ffmpeg &&
+      checks.phonemeEndpoint &&
       checks.rubricSigningSecret;
     response.status(ready ? 200 : 503).json({
       ready,
@@ -1134,6 +1147,28 @@ export function createApp({
           linguisticClient,
         );
         const requestId = request.gordonRequestId;
+        let phoneticEvidence = evidenciaFoneticaDesdeMultipart(request.body);
+        let phoneticRemoteError = null;
+        if (phonemeEndpoint) {
+          phoneticEvidence = null;
+          try {
+            phoneticEvidence = await solicitarEvidenciaFonetica({
+              audioPath: normalizedPath,
+              endpoint: phonemeEndpoint,
+              apiKey: phonemeApiKey,
+              timeoutMs: phonemeTimeoutMs,
+              requestId,
+            });
+          } catch (error) {
+            phoneticRemoteError = {
+              code: error?.code ?? 'PHONEME_REMOTE_ERROR',
+              message:
+                error?.message ??
+                'El endpoint fonético remoto no estuvo disponible.',
+              details: error?.details ?? null,
+            };
+          }
+        }
         const report = await ejecutarEvaluacion({
           rubric,
           originalAudio: request.file.path,
@@ -1145,7 +1180,8 @@ export function createApp({
           linguisticModel: LINGUISTIC_MODEL,
           whisperModel: GROQ_MODEL,
           analyzeSpeech: analizarHabla,
-          phoneticEvidence: evidenciaFoneticaDesdeMultipart(request.body),
+          phoneticEvidence,
+          phoneticError: phoneticRemoteError,
           requestId,
         });
         delete report._private;
@@ -1225,6 +1261,8 @@ export function createApp({
                 report.providerEvidence?.linguistic?.error ?? null,
               pronunciation:
                 report.providerEvidence?.phonetic?.error ?? null,
+              phoneticInput:
+                report.providerEvidence?.phonetic?.inputError ?? null,
               phoneticLiteral:
                 report.providerEvidence?.phonetic
                   ?.literalTranscriptionError ?? null,

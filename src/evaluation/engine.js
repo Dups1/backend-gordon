@@ -84,11 +84,11 @@ function unavailableAcoustic(id, constructScope) {
   return dimensionResult({
     id,
     status: 'unavailable',
-    methodId: 'local-phonetic-alignment-pending',
+    methodId: 'remote-phonetic-alignment-pending',
     reliability: 'unknown',
-    reasonCode: 'LOCAL_PHONETIC_SCORING_PENDING',
+    reasonCode: 'REMOTE_PHONETIC_SCORING_PENDING',
     limitations: [
-      'La puntuación acústica está pendiente de integrar el motor fonético local con alineación contra la pronunciación esperada.',
+      'La puntuación acústica está pendiente de recibir evidencia del endpoint fonético remoto y alinearla contra la pronunciación esperada.',
     ],
     constructScope,
     reviewRequired: true,
@@ -409,6 +409,7 @@ export async function runAssessment({
   whisperModel,
   analyzeSpeech,
   phoneticEvidence,
+  phoneticError = null,
   requestId,
 }) {
   const assessmentId = newAssessmentId();
@@ -448,6 +449,15 @@ export async function runAssessment({
       speechEvidence: {
         pauses: { status: 'unavailable', items: null },
         elongations: { status: 'unavailable', items: null },
+        phonetic: {
+          status: phoneticError ? 'providerError' : 'unavailable',
+          transcript: null,
+          model: null,
+          durationSeconds: null,
+          confidence: null,
+          events: null,
+          error: phoneticError,
+        },
         annotatedTranscript: null,
         annotatedTranscriptStatus: 'unavailable',
         annotatedTranscriptMethod: null,
@@ -524,6 +534,20 @@ export async function runAssessment({
   let speechEvidence = {
     pauses: { status: 'unavailable', items: null },
     elongations: { status: 'unavailable', items: null },
+    phonetic: {
+      status: phoneticEvidence?.transcript
+        ? 'complete'
+        : phoneticError
+          ? 'providerError'
+          : 'unavailable',
+      transcript: phoneticEvidence?.transcript ?? null,
+      model: phoneticEvidence?.model ?? null,
+      durationSeconds:
+        phoneticEvidence?.durationSeconds ?? quality.metrics.durationSeconds,
+      confidence: phoneticEvidence?.confidence ?? null,
+      events: phoneticEvidence?.events ?? null,
+      error: phoneticError,
+    },
     annotatedTranscript: null,
     annotatedTranscriptStatus: 'unavailable',
     annotatedTranscriptMethod: null,
@@ -538,6 +562,7 @@ export async function runAssessment({
         pronunciacion: null,
       });
       speechEvidence = {
+        ...speechEvidence,
         pauses: {
           status: legacy ? 'complete' : 'unavailable',
           items: legacy?.pauses ?? null,
@@ -546,10 +571,6 @@ export async function runAssessment({
           status: legacy ? 'complete' : 'unavailable',
           items: legacy?.elongations ?? null,
         },
-        annotatedTranscript: null,
-        annotatedTranscriptStatus: 'unavailable',
-        annotatedTranscriptMethod: null,
-        annotatedTranscriptError: null,
         method: legacy?.method ?? null,
       };
     } catch (error) {
@@ -769,11 +790,13 @@ export async function runAssessment({
           },
         },
         phonetic: {
-          provider: 'wav2vec2-local',
+          provider: phoneticEvidence?.provider ?? 'remote-wav2vec2',
           model: phoneticEvidence?.model ?? null,
           status: phoneticEvidence?.transcript
             ? 'complete'
-            : 'unavailable',
+            : phoneticError
+              ? 'providerError'
+              : 'unavailable',
           confidence: phoneticEvidence?.confidence ?? null,
           nativeLanguage: rubric.spec.nativeLanguage,
           judgeModel: linguisticModel,
@@ -804,6 +827,7 @@ export async function runAssessment({
       },
       phonetic: {
         input: phoneticEvidence ?? null,
+        inputError: phoneticError,
         literalTranscription: phoneticLiteralTranscription,
         literalTranscriptionError:
           speechEvidence.annotatedTranscriptError ?? null,

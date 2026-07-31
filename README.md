@@ -6,11 +6,12 @@ Motor Node.js de evaluación oral para Gordon:
 - DeepSeek V4 Flash mediante OpenCode Zen: rúbrica, evidencia lingüística,
   doble juez, pronunciación fonética y recomendación.
 - Gordon: calidad del audio, abstención, puntuación y procedencia.
-- Wav2Vec2 local: evidencia fonética experimental en desarrollo.
+- Wav2Vec2 remoto: evidencia fonética recibida desde el endpoint configurado.
 
-Pronunciación y fluidez quedan `unavailable` hasta integrar y calibrar el
-alineador fonético local. El backend no inventa puntuaciones acústicas ni
-redistribuye sus pesos.
+El backend normaliza cada audio a WAV PCM16 mono de 16 kHz y lo envía al
+endpoint Wav2Vec2 remoto. Si el endpoint no responde, la evidencia queda como
+`providerError`; no se usa ningún modelo fonético local ni se inventa una
+puntuación acústica.
 
 ## API v2
 
@@ -52,6 +53,10 @@ Variables:
 - `OPENCODE_API_KEY`
 - `OPENCODE_MODEL` (opcional; predeterminado `deepseek-v4-flash`)
 - `OPENCODE_BASE_URL` (opcional; predeterminado `https://opencode.ai/zen/v1`)
+- `GORDON_PHONEME_URL` (requerido para la evaluación fonética; acepta la URL
+  base o `/api/v1/phonemes`)
+- `GORDON_PHONEME_API_KEY` (opcional; se envía como Bearer)
+- `GORDON_PHONEME_TIMEOUT_MS` (opcional; predeterminado `240000`)
 - `OPENCODE_LINGUISTIC_TPM_LIMIT` (opcional)
 - `MAX_CONCURRENT_ASSESSMENTS` (opcional)
 - `RATE_LIMIT_PER_MINUTE` (opcional)

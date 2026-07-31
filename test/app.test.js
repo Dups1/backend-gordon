@@ -61,6 +61,7 @@ test('expone el estado del servicio y el modelo configurado', async () => {
     service: 'backend-gordon',
     model: GROQ_MODEL,
     linguisticModel: LINGUISTIC_MODEL,
+    phonemeEndpointConfigured: false,
     promptVersion: 'gordon-evidence-v1.11',
   });
 });
