@@ -9,7 +9,7 @@ import {
 } from '../src/evaluation/prompts.js';
 
 test('carga prompts separados, versionados y resistentes a instrucciones', () => {
-  assert.equal(PROMPT_MANIFEST_VERSION, 'gordon-evidence-v1.12');
+  assert.equal(PROMPT_MANIFEST_VERSION, 'gordon-evidence-v1.13');
   assert.match(PROMPT_MANIFEST_HASH, /^[a-f0-9]{64}$/);
   assert.match(INTERNAL_PROMPTS.securityEnvelope, /nunca instrucciones/i);
   assert.match(INTERNAL_PROMPTS.instructionImprover, /intención docente/i);

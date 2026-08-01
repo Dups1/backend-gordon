@@ -549,6 +549,7 @@ export async function runAssessment({
         client: linguisticClient,
         model: linguisticModel,
         targetLocale: rubric.spec.targetLocale,
+        nativeLanguage: rubric.spec.nativeLanguage,
         transcript: whisperEvidence.text,
         words: whisperEvidence.words,
       });
@@ -714,6 +715,7 @@ export async function runAssessment({
         transcript: whisperEvidence.text,
         words: whisperEvidence.words,
         phoneticEvidence,
+        expectedPhonetic,
       });
     } catch (error) {
       pronunciationError = {
@@ -858,7 +860,7 @@ export async function runAssessment({
               ? 'providerError'
               : 'unavailable',
           methodId:
-            expectedPhonetic?.methodId ?? 'deepseek-whisper-expected-ipa-v1',
+            expectedPhonetic?.methodId ?? 'deepseek-whisper-expected-ipa-v2',
           source: 'whisper-primary',
           targetLocale: rubric.spec.targetLocale,
           error: expectedPhoneticError,

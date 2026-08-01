@@ -245,6 +245,9 @@ test('genera IPA esperada únicamente desde la transcripción de Whisper', async
   );
   const payload = JSON.parse(client.calls[0].messages[1].content).data;
   assert.equal(payload.transcript, 'Japan route.');
+  assert.equal(payload.dialect, 'General American');
+  assert.equal(payload.nativeLanguage, 'other');
+  assert.equal(payload.pronunciationStyle, 'connected');
   assert.deepEqual(payload.words, [
     { id: 'w0', text: 'Japan' },
     { id: 'w1', text: 'route' },
@@ -252,6 +255,38 @@ test('genera IPA esperada únicamente desde la transcripción de Whisper', async
   assert.match(client.calls[0].messages[0].content, /pronunciación IPA esperada/i);
   assert.equal(JSON.stringify(payload).includes('observed'), false);
   assert.equal(client.pendingResponses, 0);
+});
+
+test('conserva variantes válidas de nombres propios desde la IPA esperada', async () => {
+  const client = structuredClient([
+    {
+      fullIpa: 'ˈdeɪvɪd',
+      words: [
+        {
+          id: 'w0',
+          text: 'David',
+          ipa: 'ˈdeɪvɪd',
+          validVariants: ['daˈβið', 'daˈbid'],
+          isProperName: true,
+        },
+      ],
+    },
+  ]);
+
+  const result = await generateExpectedPhoneticFromWhisper({
+    client,
+    model: 'deepseek-v4-flash',
+    targetLocale: 'en-US',
+    nativeLanguage: 'es',
+    transcript: 'David.',
+    words: [{ word: 'David', start: 0, end: 0.5 }],
+  });
+
+  assert.deepEqual(result.words[0].validVariants, ['daˈβið', 'daˈbid']);
+  assert.equal(result.words[0].isProperName, true);
+  const payload = JSON.parse(client.calls[0].messages[1].content).data;
+  assert.equal(payload.nativeLanguage, 'es');
+  assert.equal(payload.pronunciationStyle, 'connected');
 });
 
 test('conserva una conversión legible si DeepSeek no copia el IPA con exactitud', async () => {
@@ -428,6 +463,61 @@ test('usa JSON Object Mode y valida localmente el juez fonético', async () => {
   assert.equal(outputPayload.data.observedIpa, undefined);
   assert.equal(outputPayload.outputSchema.required.includes('band'), true);
   assert.equal(client.pendingResponses, 0);
+});
+
+test('entrega variantes de nombres propios al juez de pronunciación', async () => {
+  const client = structuredClient([
+    {
+      band: 3,
+      rationale: 'La variante observada conserva la identidad del nombre.',
+      observations: [],
+    },
+  ]);
+
+  const result = await judgePronunciationFromPhonetics({
+    client,
+    model: 'test-model',
+    rubric: {
+      spec: {
+        mode: 'spontaneous',
+        targetLocale: 'en-US',
+        cefr: 'B1',
+        nativeLanguage: 'es',
+      },
+    },
+    transcript: 'David.',
+    words: [{ word: 'David', start: 0, end: 0.5 }],
+    phoneticEvidence: {
+      transcript: 'daβið',
+      model: 'wav2vec2-phoneme-en',
+      confidence: 0.7,
+      events: [
+        { phoneme: 'd', startSec: 0, endSec: 0.1, confidence: 0.7 },
+        { phoneme: 'a', startSec: 0.12, endSec: 0.2, confidence: 0.7 },
+        { phoneme: 'β', startSec: 0.22, endSec: 0.3, confidence: 0.7 },
+        { phoneme: 'i', startSec: 0.32, endSec: 0.4, confidence: 0.7 },
+        { phoneme: 'ð', startSec: 0.42, endSec: 0.48, confidence: 0.7 },
+      ],
+    },
+    expectedPhonetic: {
+      words: [
+        {
+          id: 'w0',
+          ipa: 'ˈdeɪvɪd',
+          validVariants: ['daˈβið'],
+          isProperName: true,
+        },
+      ],
+    },
+  });
+
+  assert.equal(result.band, 3);
+  const systemPrompt = client.calls[0].messages[0].content;
+  assert.match(systemPrompt, /todas son pronunciaciones válidas/i);
+  const payload = JSON.parse(client.calls[0].messages[1].content).data;
+  assert.equal(payload.wordAlignments[0].expectedIpa, 'ˈdeɪvɪd');
+  assert.deepEqual(payload.wordAlignments[0].validVariants, ['daˈβið']);
+  assert.equal(payload.wordAlignments[0].isProperName, true);
 });
 
 test('recupera una mejora de consigna cuando OpenCode entrega contenido vacío', async () => {
