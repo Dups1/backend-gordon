@@ -4,7 +4,7 @@ Motor Node.js de evaluación oral para Gordon:
 
 - Whisper Large-v3: transcripción y timestamps.
 - DeepSeek V4 Flash mediante OpenCode Zen: rúbrica, evidencia lingüística,
-  doble juez, pronunciación fonética y recomendación.
+  doble juez, IPA esperada desde Whisper y recomendación.
 - Gordon: calidad del audio, abstención, puntuación y procedencia.
 - Wav2Vec2 remoto: evidencia fonética recibida desde el endpoint configurado.
 
@@ -26,9 +26,13 @@ puntuación acústica.
 `confirmedRubricToken` como multipart. MP3, Opus, WebM, OGG, M4A, MP4, MPEG,
 FLAC y WAV se validan por firma y se normalizan a WAV PCM16 mono de 16 kHz.
 
-La respuesta incluye calidad del audio, transcripción de Whisper, pausas,
-dimensiones lingüísticas, recomendación y procedencia. El score global es
-`null` mientras falte una dimensión obligatoria.
+La respuesta incluye calidad del audio, transcripción de Whisper, una
+`speechEvidence.expectedPhonetic` con IPA esperada por palabra, pausas,
+dimensiones lingüísticas, recomendación y procedencia. La IPA esperada se
+genera únicamente desde Whisper y se conserva separada de
+`speechEvidence.phonetic`, que contiene los sonidos observados por Wav2Vec2;
+ninguna de las dos capas se reemplaza todavía. El score global es `null`
+mientras falte una dimensión obligatoria.
 
 ## Compatibilidad v1
 

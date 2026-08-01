@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   extractLinguisticEvidence,
+  generateExpectedPhoneticFromWhisper,
   improveStudentInstructionWithAI,
   judgePronunciationFromPhonetics,
   resetLinguisticGovernorForTests,
@@ -209,6 +210,48 @@ test('convierte fonemas en texto literal sin recibir Whisper ni una frase espera
     client.calls[0].messages[0].content,
     /no conviertas una secuencia en una palabra correcta/i,
   );
+});
+
+test('genera IPA esperada únicamente desde la transcripción de Whisper', async () => {
+  const client = structuredClient([
+    {
+      fullIpa: 'dʒəˈpæn ɹuːt',
+      words: [
+        { id: 'w0', text: 'Japan', ipa: 'dʒəˈpæn' },
+        { id: 'w1', text: 'route', ipa: 'ɹuːt' },
+      ],
+    },
+  ]);
+
+  const result = await generateExpectedPhoneticFromWhisper({
+    client,
+    model: 'deepseek-v4-flash',
+    targetLocale: 'en-US',
+    transcript: 'Japan route.',
+    words: [
+      { word: 'Japan', start: 0, end: 0.55 },
+      { word: 'route', start: 0.6, end: 1.1 },
+    ],
+  });
+
+  assert.equal(result.transcript, 'dʒəˈpæn ɹuːt');
+  assert.equal(result.source, 'whisper-primary');
+  assert.deepEqual(
+    result.words.map((word) => [word.id, word.text, word.ipa]),
+    [
+      ['w0', 'Japan', 'dʒəˈpæn'],
+      ['w1', 'route', 'ɹuːt'],
+    ],
+  );
+  const payload = JSON.parse(client.calls[0].messages[1].content).data;
+  assert.equal(payload.transcript, 'Japan route.');
+  assert.deepEqual(payload.words, [
+    { id: 'w0', text: 'Japan' },
+    { id: 'w1', text: 'route' },
+  ]);
+  assert.match(client.calls[0].messages[0].content, /pronunciación IPA esperada/i);
+  assert.equal(JSON.stringify(payload).includes('observed'), false);
+  assert.equal(client.pendingResponses, 0);
 });
 
 test('conserva una conversión legible si DeepSeek no copia el IPA con exactitud', async () => {

@@ -339,6 +339,30 @@ const phoneticLiteralizationSchema = {
   required: ['segments'],
 };
 
+const expectedPhoneticSchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    fullIpa: { type: 'string', maxLength: 12000 },
+    words: {
+      type: 'array',
+      minItems: 1,
+      maxItems: 512,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          id: { type: 'string', minLength: 1, maxLength: 32 },
+          text: { type: 'string', minLength: 1, maxLength: 96 },
+          ipa: { type: 'string', minLength: 1, maxLength: 96 },
+        },
+        required: ['id', 'text', 'ipa'],
+      },
+    },
+  },
+  required: ['fullIpa', 'words'],
+};
+
 function structuredContentText(content) {
   if (typeof content === 'string') return content.trim();
   if (!Array.isArray(content)) return '';
@@ -1049,6 +1073,122 @@ function normalizeLiteralizedSegments(
   return {
     segments: normalized,
     exactIpaCoverage: requireExactIpaCoverage,
+  };
+}
+
+function sourceWordsFromWhisper(transcript, words) {
+  const fromWords = Array.isArray(words)
+    ? words
+        .map((word) => ({
+          text: typeof word?.word === 'string' ? word.word.trim() : '',
+          startSec:
+            typeof word?.start === 'number' && Number.isFinite(word.start)
+              ? word.start
+              : null,
+          endSec:
+            typeof word?.end === 'number' && Number.isFinite(word.end)
+              ? word.end
+              : null,
+        }))
+        .filter((word) => word.text)
+    : [];
+  const fallback = fromWords.length
+    ? fromWords
+    : normalizeTokens(transcript).map((text) => ({
+        text,
+        startSec: null,
+        endSec: null,
+      }));
+  return fallback.slice(0, 512).map((word, index) => ({
+    id: `w${index}`,
+    ...word,
+  }));
+}
+
+function normalizeExpectedPhonetic(raw, sourceWords) {
+  if (!raw || typeof raw !== 'object' || !Array.isArray(raw.words)) {
+    return null;
+  }
+  const byId = new Map(
+    raw.words
+      .filter((word) => typeof word?.id === 'string')
+      .map((word) => [word.id, word]),
+  );
+  const normalized = [];
+  for (const source of sourceWords) {
+    const candidate = byId.get(source.id);
+    const ipa =
+      typeof candidate?.ipa === 'string' ? candidate.ipa.normalize('NFC').trim() : '';
+    if (!candidate || !ipa || /[\r\n]/u.test(ipa)) return null;
+    normalized.push({
+      id: source.id,
+      text: source.text,
+      ipa: ipa.slice(0, 96),
+      startSec: source.startSec,
+      endSec: source.endSec,
+    });
+  }
+  if (!normalized.length) return null;
+  return {
+    words: normalized,
+    transcript: normalized.map((word) => word.ipa).join(' '),
+  };
+}
+
+export async function generateExpectedPhoneticFromWhisper({
+  client,
+  model,
+  targetLocale,
+  transcript,
+  words,
+}) {
+  const sourceWords = sourceWordsFromWhisper(transcript, words);
+  if (!sourceWords.length) return null;
+  const payload = {
+    targetLocale,
+    transcript: typeof transcript === 'string' ? transcript.trim() : '',
+    words: sourceWords.map(({ id, text }) => ({ id, text })),
+  };
+  const request = (system, schemaName) =>
+    callStructured({
+      client,
+      model,
+      schema: expectedPhoneticSchema,
+      schemaName,
+      maxTokens: 2200,
+      system,
+      payload,
+    });
+
+  let raw = await request(
+    INTERNAL_PROMPTS.expectedPhonetic,
+    'gordon_expected_phonetic_from_whisper',
+  );
+  let normalized = normalizeExpectedPhonetic(raw, sourceWords);
+  if (!normalized) {
+    raw = await request(
+      `${INTERNAL_PROMPTS.expectedPhonetic}\n\nEl intento anterior no devolvió exactamente todos los ids. Repite cada id recibido una sola vez y conserva el texto de entrada; cambia únicamente el campo ipa.`,
+      'gordon_expected_phonetic_from_whisper_repair',
+    );
+    normalized = normalizeExpectedPhonetic(raw, sourceWords);
+  }
+  if (!normalized) {
+    throw new EvaluationError(
+      502,
+      'El modelo no devolvió una IPA esperada alineada con Whisper.',
+      'EXPECTED_PHONETIC_INVALID_OUTPUT',
+      { sourceWords: sourceWords.length },
+    );
+  }
+  return {
+    provider: 'opencode-zen',
+    model,
+    targetLocale,
+    source: 'whisper-primary',
+    transcript: normalized.transcript,
+    words: normalized.words,
+    methodId: 'deepseek-whisper-expected-ipa-v1',
+    promptVersion: PROMPT_VERSION,
   };
 }
 

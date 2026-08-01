@@ -54,6 +54,7 @@ export const INTERNAL_PROMPTS = Object.freeze({
   securityEnvelope: prompt('securityEnvelope'),
   instructionImprover: prompt('instructionImprover'),
   phoneticLiteralizer: prompt('phoneticLiteralizer'),
+  expectedPhonetic: prompt('expectedPhonetic'),
   rubricCompiler: prompt('rubricCompiler'),
   evidenceExtractor: prompt('evidenceExtractor'),
   analyticJudge: prompt('analyticJudge'),

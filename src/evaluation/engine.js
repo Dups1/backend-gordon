@@ -14,6 +14,7 @@ import {
 } from './domain.js';
 import {
   extractLinguisticEvidence,
+  generateExpectedPhoneticFromWhisper,
   generatePedagogicalFeedback,
   judgePronunciationFromPhonetics,
   runDoubleLinguisticJudging,
@@ -458,6 +459,15 @@ export async function runAssessment({
           events: null,
           error: phoneticError,
         },
+        expectedPhonetic: {
+          status: 'unavailable',
+          transcript: null,
+          model: null,
+          targetLocale: rubric.spec.targetLocale,
+          source: null,
+          words: null,
+          error: null,
+        },
         annotatedTranscript: null,
         annotatedTranscriptStatus: 'unavailable',
         annotatedTranscriptMethod: null,
@@ -531,6 +541,27 @@ export async function runAssessment({
     providerDisagreement: null,
     reviewRequired: false,
   };
+  let expectedPhonetic = null;
+  let expectedPhoneticError = null;
+  if (whisper && whisperEvidence.text?.trim()) {
+    try {
+      expectedPhonetic = await generateExpectedPhoneticFromWhisper({
+        client: linguisticClient,
+        model: linguisticModel,
+        targetLocale: rubric.spec.targetLocale,
+        transcript: whisperEvidence.text,
+        words: whisperEvidence.words,
+      });
+    } catch (error) {
+      expectedPhoneticError = {
+        code: error?.code ?? 'EXPECTED_PHONETIC_PROVIDER_ERROR',
+        message:
+          error?.message ??
+          'La pronunciación IPA esperada no pudo generarse desde Whisper.',
+        details: error?.details ?? null,
+      };
+    }
+  }
   let speechEvidence = {
     pauses: { status: 'unavailable', items: null },
     elongations: { status: 'unavailable', items: null },
@@ -547,6 +578,20 @@ export async function runAssessment({
       confidence: phoneticEvidence?.confidence ?? null,
       events: phoneticEvidence?.events ?? null,
       error: phoneticError,
+    },
+    expectedPhonetic: {
+      status: expectedPhonetic
+        ? 'complete'
+        : expectedPhoneticError
+          ? 'providerError'
+          : 'unavailable',
+      transcript: expectedPhonetic?.transcript ?? null,
+      model: expectedPhonetic?.model ?? null,
+      targetLocale:
+        expectedPhonetic?.targetLocale ?? rubric.spec.targetLocale,
+      source: expectedPhonetic?.source ?? null,
+      words: expectedPhonetic?.words ?? null,
+      error: expectedPhoneticError,
     },
     annotatedTranscript: null,
     annotatedTranscriptStatus: 'unavailable',
@@ -804,6 +849,20 @@ export async function runAssessment({
           literalTranscriptMethod:
             phoneticLiteralTranscription?.methodId ?? null,
         },
+        expectedPhonetic: {
+          provider: expectedPhonetic?.provider ?? 'opencode-zen',
+          model: expectedPhonetic?.model ?? linguisticModel,
+          status: expectedPhonetic
+            ? 'complete'
+            : expectedPhoneticError
+              ? 'providerError'
+              : 'unavailable',
+          methodId:
+            expectedPhonetic?.methodId ?? 'deepseek-whisper-expected-ipa-v1',
+          source: 'whisper-primary',
+          targetLocale: rubric.spec.targetLocale,
+          error: expectedPhoneticError,
+        },
       },
       calibrationVersion: CALIBRATION_VERSION,
       calibrationStatus: 'provisional',
@@ -833,6 +892,10 @@ export async function runAssessment({
           speechEvidence.annotatedTranscriptError ?? null,
         judging: pronunciationJudging,
         error: pronunciationError,
+      },
+      expectedPhonetic: {
+        output: expectedPhonetic,
+        error: expectedPhoneticError,
       },
     },
     _private: {
