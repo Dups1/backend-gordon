@@ -497,6 +497,43 @@ test('recupera una mejora de consigna cuando OpenCode entrega contenido vacío',
   assert.ok(calls[1].max_tokens > calls[0].max_tokens);
 });
 
+test('no cambia de modelo cuando OpenCode devuelve 403', async () => {
+  const calls = [];
+  const client = {
+    chat: {
+      completions: {
+        async create(options) {
+          calls.push(options);
+          const error = new Error('model access forbidden');
+          error.status = 403;
+          throw error;
+        },
+      },
+    },
+  };
+
+  await assert.rejects(
+    () =>
+      improveStudentInstructionWithAI({
+        client,
+        model: 'deepseek-v4-flash',
+        spec: {
+          mode: 'spontaneous',
+          targetLocale: 'en-US',
+          cefr: 'B1',
+          instruction: 'Describe una experiencia.',
+        },
+      }),
+    (error) => {
+      assert.equal(error.code, 'LINGUISTIC_ACCESS_FORBIDDEN');
+      assert.equal(error.details.model, 'deepseek-v4-flash');
+      return true;
+    },
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].model, 'deepseek-v4-flash');
+});
+
 test('recupera evidencia y pronunciación si DeepSeek agota el primer intento razonando', async () => {
   const emptyLengthResponse = (maxTokens) => ({
     choices: [

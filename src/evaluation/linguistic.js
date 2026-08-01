@@ -533,6 +533,7 @@ function safeProviderMessage(error) {
         : '';
   return raw
     .replace(/gsk_[A-Za-z0-9_-]+/g, '[redacted]')
+    .replace(/opencode_[A-Za-z0-9_-]+/g, '[redacted]')
     .replace(/Bearer\s+\S+/gi, 'Bearer [redacted]')
     .replace(/\s+/g, ' ')
     .trim()
@@ -594,6 +595,12 @@ function providerFailure(error, stage) {
       code: 'LINGUISTIC_RATE_LIMIT',
       message: 'DeepSeek V4 Flash alcanzó temporalmente su límite.',
     },
+    403: {
+      status: 502,
+      code: 'LINGUISTIC_ACCESS_FORBIDDEN',
+      message:
+        'OpenCode rechazó el acceso al modelo lingüístico. Verifica la clave, el modelo habilitado y el saldo o cuota de la cuenta.',
+    },
   };
   const classification = classifications[status] ?? {
     status: 502,
@@ -615,6 +622,7 @@ function providerFailure(error, stage) {
       providerRequestId:
         providerHeader(error, 'x-request-id') ??
         providerHeader(error, 'request-id'),
+      providerMessage: safeProviderMessage(error) || null,
       retryAfter: providerHeader(error, 'retry-after'),
       remainingTokens: providerHeader(error, 'x-ratelimit-remaining-tokens'),
       resetTokens: providerHeader(error, 'x-ratelimit-reset-tokens'),
@@ -853,6 +861,7 @@ async function callStructured({
       const failure = providerFailure(lastError, schemaName);
       failure.details = {
         ...(failure.details ?? {}),
+        model,
         ...lastRequestEstimate,
         maxCompletionTokens: formatRecovery
           ? RECOVERY_STRUCTURED_COMPLETION_TOKENS
