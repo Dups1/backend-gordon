@@ -217,8 +217,8 @@ test('genera IPA esperada únicamente desde la transcripción de Whisper', async
     {
       fullIpa: 'dʒəˈpæn ɹuːt',
       words: [
-        { id: 'w0', text: 'Japan', ipa: 'dʒəˈpæn' },
-        { id: 'w1', text: 'route', ipa: 'ɹuːt' },
+        { id: 'w0', text: 'Japan', ipa: 'dʒəˈpæn', literal: 'yapán' },
+        { id: 'w1', text: 'route', ipa: 'ɹuːt', literal: 'ruut' },
       ],
     },
   ]);
@@ -235,6 +235,11 @@ test('genera IPA esperada únicamente desde la transcripción de Whisper', async
   });
 
   assert.equal(result.transcript, 'dʒəˈpæn ɹuːt');
+  assert.equal(result.literalTranscript, 'yapán ruut');
+  assert.equal(
+    result.literalMethodId,
+    'linguistic-whisper-expected-ipa-literal-v1',
+  );
   assert.equal(result.source, 'whisper-primary');
   assert.deepEqual(
     result.words.map((word) => [word.id, word.text, word.ipa]),
@@ -242,6 +247,10 @@ test('genera IPA esperada únicamente desde la transcripción de Whisper', async
       ['w0', 'Japan', 'dʒəˈpæn'],
       ['w1', 'route', 'ɹuːt'],
     ],
+  );
+  assert.deepEqual(
+    result.words.map((word) => word.literal),
+    ['yapán', 'ruut'],
   );
   const payload = JSON.parse(client.calls[0].messages[1].content).data;
   assert.equal(payload.transcript, 'Japan route.');
@@ -266,6 +275,7 @@ test('conserva variantes válidas de nombres propios desde la IPA esperada', asy
           id: 'w0',
           text: 'David',
           ipa: 'ˈdeɪvɪd',
+          literal: 'déivid',
           validVariants: ['daˈβið', 'daˈbid'],
           isProperName: true,
         },

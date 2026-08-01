@@ -462,6 +462,9 @@ export async function runAssessment({
         expectedPhonetic: {
           status: 'unavailable',
           transcript: null,
+          literalTranscript: null,
+          literalMethodId: null,
+          literalStatus: 'unavailable',
           model: null,
           targetLocale: rubric.spec.targetLocale,
           source: null,
@@ -587,6 +590,13 @@ export async function runAssessment({
           ? 'providerError'
           : 'unavailable',
       transcript: expectedPhonetic?.transcript ?? null,
+      literalTranscript: expectedPhonetic?.literalTranscript ?? null,
+      literalMethodId: expectedPhonetic?.literalMethodId ?? null,
+      literalStatus: expectedPhonetic?.literalTranscript
+        ? 'complete'
+        : expectedPhonetic
+          ? 'unavailable'
+          : 'unavailable',
       model: expectedPhonetic?.model ?? null,
       targetLocale:
         expectedPhonetic?.targetLocale ?? rubric.spec.targetLocale,
@@ -861,6 +871,13 @@ export async function runAssessment({
               : 'unavailable',
           methodId:
             expectedPhonetic?.methodId ?? 'deepseek-whisper-expected-ipa-v2',
+          literalTranscript: expectedPhonetic?.literalTranscript ?? null,
+          literalMethodId: expectedPhonetic?.literalMethodId ?? null,
+          literalStatus: expectedPhonetic?.literalTranscript
+            ? 'complete'
+            : expectedPhonetic
+              ? 'unavailable'
+              : 'unavailable',
           source: 'whisper-primary',
           targetLocale: rubric.spec.targetLocale,
           error: expectedPhoneticError,

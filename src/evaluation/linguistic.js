@@ -355,6 +355,7 @@ const expectedPhoneticSchema = {
                 id: { type: 'string', minLength: 1, maxLength: 32 },
                 text: { type: 'string', minLength: 1, maxLength: 96 },
                 ipa: { type: 'string', minLength: 1, maxLength: 96 },
+                literal: { type: 'string', minLength: 1, maxLength: 96 },
                 validVariants: {
                   type: 'array',
                   maxItems: 3,
@@ -1120,7 +1121,7 @@ function sourceWordsFromWhisper(transcript, words) {
   }));
 }
 
-function normalizeExpectedPhonetic(raw, sourceWords) {
+function normalizeExpectedPhonetic(raw, sourceWords, { requireLiteral = false } = {}) {
   if (!raw || typeof raw !== 'object' || !Array.isArray(raw.words)) {
     return null;
   }
@@ -1156,10 +1157,21 @@ function normalizeExpectedPhonetic(raw, sourceWords) {
       candidate.validVariants ?? candidate.variants,
       ipa,
     );
+    const literal =
+      typeof candidate.literal === 'string'
+        ? candidate.literal.normalize('NFC').trim()
+        : '';
+    if (requireLiteral && (!literal || /\s/u.test(literal))) {
+      return null;
+    }
     normalized.push({
       id: source.id,
       text: source.text,
       ipa: ipa.slice(0, 96),
+      literal:
+        literal && !/\s/u.test(literal) && literal.length <= 96
+          ? literal
+          : null,
       validVariants,
       isProperName: candidate.isProperName === true,
       startSec: source.startSec,
@@ -1170,6 +1182,9 @@ function normalizeExpectedPhonetic(raw, sourceWords) {
   return {
     words: normalized,
     transcript: normalized.map((word) => word.ipa).join(' '),
+    literalTranscript: normalized.every((word) => word.literal)
+      ? normalized.map((word) => word.literal).join(' ')
+      : null,
   };
 }
 
@@ -1208,12 +1223,14 @@ export async function generateExpectedPhoneticFromWhisper({
     'gordon_expected_phonetic_from_whisper',
   );
   let normalized = normalizeExpectedPhonetic(raw, sourceWords);
-  if (!normalized) {
+  if (!normalized || !normalized.literalTranscript) {
     raw = await request(
-      `${INTERNAL_PROMPTS.expectedPhonetic}\n\nEl intento anterior no devolvió exactamente todos los ids. Repite cada id recibido una sola vez y conserva el texto de entrada; cambia únicamente el campo ipa.`,
-      'gordon_expected_phonetic_from_whisper_repair',
+      `${INTERNAL_PROMPTS.expectedPhonetic}\n\nEl intento anterior no incluyó una lectura literal completa. Repite cada id recibido una sola vez, conserva el texto y el IPA de entrada, y añade un campo literal no vacío para cada palabra.`,
+      'gordon_expected_phonetic_from_whisper_literal_repair',
     );
-    normalized = normalizeExpectedPhonetic(raw, sourceWords);
+    normalized =
+      normalizeExpectedPhonetic(raw, sourceWords, { requireLiteral: true }) ??
+      normalizeExpectedPhonetic(raw, sourceWords);
   }
   if (!normalized) {
     throw new EvaluationError(
@@ -1230,6 +1247,10 @@ export async function generateExpectedPhoneticFromWhisper({
     source: 'whisper-primary',
     transcript: normalized.transcript,
     words: normalized.words,
+    literalTranscript: normalized.literalTranscript,
+    literalMethodId: normalized.literalTranscript
+      ? 'linguistic-whisper-expected-ipa-literal-v1'
+      : null,
     methodId: 'deepseek-whisper-expected-ipa-v2',
     pronunciationStyle,
     nativeLanguage,
